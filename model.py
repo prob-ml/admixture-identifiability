@@ -67,7 +67,7 @@ def fit_loss_fn(v, observation_pmf, contrib_shape, contrib_pattern, n):
 
 def fit_contribution_logpmf(observation_pmf,contrib_shape,
                             true_contrib_logpmf=None,n_iter=1000, log_every=50,
-                            initial_guess = None, lr=1, optmethod ='adam'):
+                            initial_guess = None, lr=1, optmethod ='adam', momentum=0.9):
     # get the sparsity pattern
     contrib_pattern,_ = contribution_sparsity_pattern_E0(contrib_shape)
 
@@ -101,6 +101,8 @@ def fit_contribution_logpmf(observation_pmf,contrib_shape,
     secret_losses=[]
     if optmethod == 'adam':
         optimizer = torch.optim.Adam([params], lr=lr)
+    elif optmethod == 'sgd':
+        optimizer = torch.optim.SGD([params], lr=lr,momentum=momentum)
     elif optmethod == 'lbfgs':
         optimizer = torch.optim.LBFGS([params], lr=lr, line_search_fn='strong_wolfe')
     else:
@@ -128,7 +130,8 @@ def fit_contribution_logpmf(observation_pmf,contrib_shape,
                 proposed_contribution_logpmf = parameters_to_contribution_logpmf(
                     params, contrib_shape, contrib_pattern)
                 proposed_contribution_pmf = torch.exp(proposed_contribution_logpmf)
-                secret_losses.append(torch.sum((proposed_contribution_pmf - true_contrib_pmf) ** 2).item())
+                mask = ~torch.isneginf(true_contrib_logpmf)
+                secret_losses.append(torch.sum((proposed_contribution_logpmf[mask] - true_contrib_logpmf[mask]) ** 2).item())
 
             logger.info(
                 f"Iteration {i}: Loss = {losses[-1]}, "

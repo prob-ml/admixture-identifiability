@@ -10,7 +10,6 @@ import time
 
 model.logger.setLevel("INFO")
 
-#####################################
 # %% check that contribution_pmf_to_observation_pmf
 # seems to be about right
 
@@ -49,8 +48,6 @@ for i in range(mc_samples):
 print((observed_sample_counts/mc_samples - torch.exp(observation_logpmf)).abs().max())
 
 
-
-#####################################
 # %% example gradienting
 
 # make some ground truth
@@ -100,12 +97,10 @@ assert torch.allclose(loss1, loss2, atol=1e-6), f"loss1 ({loss1}) and loss2 ({lo
 assert torch.allclose(grad1, grad2, atol=1e-6), "grad1 and grad2 are not close"
 
 
-
-#####################################
 # %% setup example training
 
 # make some ground truth
-n = 10
+n = 8
 contrib_shape = (3, )*5
 N=len(contrib_shape)
 contrib_pattern,contrib_pattern_idxs = model.contribution_sparsity_pattern_E0(contrib_shape)
@@ -121,7 +116,7 @@ print('patterns in truth')
 print('.   [off] --> logit is 0.0')
 print(f'.   [default] --> logit is {secret_v[0].item()}')
 for p in patterns:
-    secret_v[p]=0
+    secret_v[p]=-6
     print('.  ',contrib_pattern[p+1], '--> logit is', secret_v[p])
 contribution_logpmf = model.parameters_to_contribution_logpmf(
     secret_v, contrib_shape, contrib_pattern)
@@ -134,7 +129,7 @@ print('\npatterns in initial guess')
 print('.   [off] --> logit is 0.0')
 print(f'.   [default] --> logit is {initial_guess_v[0].item()}')
 for p in guess_patterns:
-    initial_guess_v[p]=0
+    initial_guess_v[p]=-6
     print('.  ',contrib_pattern[p+1], '--> logit is', initial_guess_v[p])
 
 # make initial guess
@@ -164,21 +159,35 @@ for i in range(2):
     loss.backward()
     print(". time taken to compute loss and gradient", time.time() - start_time)
 
+# report number of ops for likelihood evaluation
+nops = np.prod(observation_logpmf.shape)*len(contrib_pattern)*n
+print(f'nops: {nops}={nops/1e6:.2f}M')
+
 # %% do the training
 # try to recover contribution_logpmf from observation_logpmf
 print('\ntraining')
+start_time = time.time()
 params, losses, secret_losses = model.fit_contribution_logpmf(
     observation_pmf,
     contrib_shape,
     true_contrib_logpmf=contribution_logpmf,
     initial_guess=initial_guess_v,
-    # optmethod="adam",
-    # n_iter=10,
+
+    optmethod="adam",
+    n_iter=500,
+    log_every=25,
+    lr=1
+
+    # optmethod='lbfgs',
+    # n_iter=20,
     # log_every=1,
-    optmethod='lbfgs',
-    n_iter=10,
-    log_every=1,
+
+    # optmethod='sgd',
+    # n_iter=100,
+    # log_every=25,
+    # lr=10
 )
+print("training time:", time.time() - start_time)
 
 guess_contribution_logpmf = model.parameters_to_contribution_logpmf(
     params, contrib_shape, contrib_pattern)
@@ -190,8 +199,7 @@ guess_observation_pmf = torch.exp(guess_observation_logpmf)
 plt.gcf().set_size_inches(2,2)
 plt.plot(losses[len(losses)//2:])
 
-# %%
-# determine gradient at the final guess
+# %% determine gradient at the final guess
 params_clone = torch.nn.Parameter(params.clone())
 guess_contribution_logpmf = model.parameters_to_contribution_logpmf(
     params_clone, contrib_shape, contrib_pattern)
@@ -199,8 +207,19 @@ guess_observation_logpmf = model.contribution_logpmf_to_observation_logpmf(guess
 mask = ~torch.isneginf(guess_observation_logpmf)
 loss = -torch.sum(observation_pmf[mask] * guess_observation_logpmf[mask])
 loss.backward()
-print(params_clone.grad)
-print('max mag',params_clone.grad.abs().max())
+grad = params_clone.grad.clone()
+print(grad)
+print('max mag',grad.abs().max())
+
+# %% do line search in direction of gradient to see if we can do better
+loss = model.fit_loss_fn(params,observation_pmf,contrib_shape,contrib_pattern,n)
+
+ls_losses=[]
+alphas=np.r_[0:1e7:20j]
+for alpha in alphas:
+    ls_losses.append(model.fit_loss_fn(params-grad*alpha,observation_pmf,contrib_shape,contrib_pattern,n).item())
+plt.gcf().set_size_inches(2,2)
+plt.plot(ls_losses)
 
 # %% plot loss in convex combination between final guess for contrib_pmf truth about contrib_pmf
 mask = observation_pmf != 0
@@ -229,8 +248,7 @@ print('.   [off] --> logit is 0.0')
 for p in npp[-11:][::-1]:
     print('.  ',contrib_pattern[p+1], f'--> logit is {params[p].item():+.5f}',f"(p# = {p}, true logit is {secret_v[p].item()})")
 
-# %%
-# say a bit about the most likely patterns
+# %% say a bit about the most likely patterns
 npp = np.argsort(params.detach().numpy())
 pvals = params.detach().numpy()[npp[-12:][::-1]]
 pvals = np.exp(pvals); pvals = pvals/pvals.sum()
@@ -239,8 +257,7 @@ for p, contrib in zip(pvals, local_contribs):
     print('   ',contrib, f'--> probability is {p:.3f}')
 
 
-# %%
-# plot loss in convex combination between final params and secret_v
+# %% plot loss in convex combination between final params and secret_v
 mask = observation_pmf != 0
 convex_comb_losses = []
 alphas = np.r_[-.2:1.2:200j]
