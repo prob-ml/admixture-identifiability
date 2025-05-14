@@ -6,6 +6,7 @@ import torch
 import math
 import matplotlib.pyplot as plt
 import numpy as np
+import time
 
 model.logger.setLevel("INFO")
 
@@ -101,7 +102,7 @@ assert torch.allclose(grad1, grad2, atol=1e-6), "grad1 and grad2 are not close"
 
 
 #####################################
-# %% example training
+# %% setup example training
 
 # make some ground truth
 n = 10
@@ -115,7 +116,7 @@ n_params = len(contrib_pattern)-1
 #     secret_v, contrib_shape, contrib_pattern)
 
 patterns=[9,15]
-secret_v= torch.full((n_params,), -20.0)
+secret_v= torch.full((n_params,), -20.0, dtype=torch.float64)
 print('patterns in truth')
 print('.   [off] --> logit is 0.0')
 print(f'.   [default] --> logit is {secret_v[0].item()}')
@@ -128,7 +129,7 @@ contribution_pmf = torch.exp(contribution_logpmf)
 
 # make initial guess
 guess_patterns=[16,2,18,8,12,13,14,10,3]
-initial_guess_v= torch.full((n_params,), -20.0)
+initial_guess_v= torch.full((n_params,), -20.0, dtype=torch.float64)
 print('\npatterns in initial guess')
 print('.   [off] --> logit is 0.0')
 print(f'.   [default] --> logit is {initial_guess_v[0].item()}')
@@ -152,10 +153,18 @@ print("\nobservation_pmf sum",torch.sum(observation_pmf.view(-1), dim=0))
 print("observation_logpmf shape", observation_logpmf.shape)
 print("observation_logpmf smallest value", observation_logpmf.min())
 
-# check loss of the truth
-loss = model.fit_loss_fn(secret_v,observation_pmf,contrib_shape,contrib_pattern,n)
-print("loss of truth", loss.item())
+# check loss of the truth, and time it also
+print("\ntime checks, and loss of the truth")
+for i in range(2):
+    params = torch.nn.Parameter(secret_v.clone())
+    start_time = time.time()
+    loss = model.fit_loss_fn(params,observation_pmf,contrib_shape,contrib_pattern,n)
+    print(". loss of truth", loss.item())
+    print(". time taken to compute loss", time.time() - start_time)
+    loss.backward()
+    print(". time taken to compute loss and gradient", time.time() - start_time)
 
+# %% do the training
 # try to recover contribution_logpmf from observation_logpmf
 print('\ntraining')
 params, losses, secret_losses = model.fit_contribution_logpmf(
@@ -164,8 +173,8 @@ params, losses, secret_losses = model.fit_contribution_logpmf(
     true_contrib_logpmf=contribution_logpmf,
     initial_guess=initial_guess_v,
     # optmethod="adam",
-    # n_iter=1000,
-    # log_every=50,
+    # n_iter=10,
+    # log_every=1,
     optmethod='lbfgs',
     n_iter=10,
     log_every=1,
@@ -223,9 +232,9 @@ for p in npp[-11:][::-1]:
 # %%
 # say a bit about the most likely patterns
 npp = np.argsort(params.detach().numpy())
-pvals = params.detach().numpy()[npp[-9:][::-1]]
+pvals = params.detach().numpy()[npp[-12:][::-1]]
 pvals = np.exp(pvals); pvals = pvals/pvals.sum()
-local_contribs = contrib_pattern.detach().numpy()[npp[-9:][::-1]+1]
+local_contribs = contrib_pattern.detach().numpy()[npp[-12:][::-1]+1]
 for p, contrib in zip(pvals, local_contribs):
     print('   ',contrib, f'--> probability is {p:.3f}')
 
@@ -244,19 +253,3 @@ for i,alpha in enumerate(alphas):
 plt.plot(alphas,convex_comb_losses)
 plt.ylabel("negative log likelihood")
 plt.xlabel("one-dimensional family of guesses for waveform distribution")
-
-# mask = ~torch.isneginf(contribution_logpmf)
-# print(torch.stack([
-#     torch.exp(contribution_logpmf[mask].view(-1)),
-#     torch.exp(guess_contribution_logpmf[mask].view(-1))
-# ]).T)
-
-# %%
-plt.plot(
-    torch.exp(contribution_logpmf[mask].view(-1)).detach().numpy(),
-    torch.exp(guess_contribution_logpmf[mask].view(-1)).detach().numpy(),
-    'x',
-)
-plt.xlabel("truth")
-plt.ylabel("guess")
-# %%
