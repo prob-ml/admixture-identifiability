@@ -30,30 +30,31 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 contrib_pattern = torch.tensor(contrib_pattern, dtype=torch.int, device=device)
 
 # pick a ground truth
+p0 = .1 # probability of off
 patterns=[10,16]
 secret_v= torch.full((n_params,), .0001, dtype=torch.float64, device=device)
-secret_v[0] = 1
+secret_v[0] = p0
 print('patterns in truth')
-print(f'.   [off] --> propto {secret_v[0].item()}')
+print(f'.   [off] --> {p0}')
 print(f'.   [default] --> propto {secret_v[1].item()}')
 for p in patterns:
     secret_v[p]=1
-    print('.  ',contrib_pattern[p+1], '--> propto ', secret_v[p])
-secret_v = secret_v/secret_v.sum()
+    print('.  ',contrib_pattern[p+1].cpu().numpy(), '--> propto ', secret_v[p].item())
+secret_v[1:] = (1-p0)*secret_v[1:]/secret_v[1:].sum()
 contribution_pmf = model.parameters_to_contribution_pmf(
     secret_v, contrib_shape, contrib_pattern)
 
 # make initial guess
 guess_patterns=[17,3,19,9,13,14,15,11,4,16,10]
 initial_guess_v= torch.full((n_params,), .01, dtype=torch.float64, device=device)
-initial_guess_v[0] = 1.0
+initial_guess_v[0] = p0
 print('\npatterns in initial guess')
-print(f'.   [off] --> propto {initial_guess_v[0].item()}')
+print(f'.   [off] --> {initial_guess_v[0].item()}')
 print(f'.   [default] --> propto {initial_guess_v[1].item()}')
 for p in guess_patterns:
     initial_guess_v[p]= 1.0
-    print('.  ',contrib_pattern[p+1], '--> propto', initial_guess_v[p])
-initial_guess_v = initial_guess_v/initial_guess_v.sum()
+    print('.  ',contrib_pattern[p+1].cpu().numpy(), '--> propto', initial_guess_v[p].item())
+initial_guess_v[1:] = (1-initial_guess_v[0])*initial_guess_v[1:]/initial_guess_v[1:].sum()
 
 # use ground truth to make observables
 # and sanity check
@@ -88,15 +89,15 @@ params, losses, secret_losses = model.fit_contribution_pmf(
     contrib_shape,
     true_contrib_pmf=contribution_pmf,
     initial_guess=initial_guess_v,
-    n_iter=1000,
+    n_iter=250,
     log_every=10,
+    fix_p0=True,
 )
 print("training time:", time.time() - start_time)
 
 guess_contribution_pmf = model.parameters_to_contribution_pmf(
     params, contrib_shape, contrib_pattern)
 guess_observation_pmf = model.contribution_pmf_to_observation_pmf(guess_contribution_pmf, n)
-
 
 # %% determine gradient at the final guess
 params_clone = torch.nn.Parameter(params.clone())
@@ -138,3 +139,5 @@ with open('local_minima_example.pkl', 'wb') as f:
         },f)
 
 
+
+# %%

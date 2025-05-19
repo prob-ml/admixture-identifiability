@@ -50,12 +50,17 @@ def fit_loss_fn(v, observation_pmf, contrib_shape, contrib_pattern, n):
 
 def fit_contribution_pmf(observation_pmf,contrib_shape,
                             true_contrib_pmf=None,n_iter=1000, log_every=1,
-                            initial_guess = None):
+                            initial_guess = None, fix_p0=False):
     # get the sparsity pattern
     contrib_pattern,_ = contribution_sparsity_pattern_E0(contrib_shape)
 
     # make a random proposal
     if initial_guess is not None:
+        # check that initial guess sums to 1
+        if not torch.allclose(
+            initial_guess.sum(),
+            torch.tensor(1.0, dtype=initial_guess.dtype, device=initial_guess.device)):
+            raise ValueError("initial_guess must sum to 1")
         initial_guess = initial_guess / initial_guess.sum()
         params = torch.nn.Parameter(initial_guess.clone())
     else:
@@ -78,6 +83,10 @@ def fit_contribution_pmf(observation_pmf,contrib_shape,
         raise ValueError(f"proposed_observation_pmf shape {proposed_observation_pmf.shape} "
                          f"does not match observation_pmf shape {observation_pmf.shape}")
 
+    if fix_p0 and initial_guess is None:
+        raise ValueError("fix_p0 is True, but initial_guess is None. "
+                         "Please provide an initial guess that has p0")
+
     # run gradient descent
     losses=[]
     secret_losses=[]
@@ -95,7 +104,12 @@ def fit_contribution_pmf(observation_pmf,contrib_shape,
             secret_losses.append(torch.sum((proposed_contribution_pmf[mask] - true_contrib_pmf[mask]) ** 2).item())
 
         newval = params*params.grad
-        newval = newval / newval.sum()
+
+        if fix_p0:
+            newval[0] = initial_guess[0]
+            newval[1:] = (1-initial_guess[0]) * newval[1:] / newval[1:].sum()
+        else:
+            newval = newval / newval.sum()
 
         params.data = newval
 

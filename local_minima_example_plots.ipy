@@ -22,33 +22,42 @@ contrib_pattern = torch.tensor(dct['contrib_pattern'], dtype=torch.int)
 secret_v = torch.tensor(dct['secret_v'], dtype=torch.float64)
 initial_guess_v = torch.tensor(dct['initial_guess_v'], dtype=torch.float64)
 
+# %% plot the loss
+plt.gcf().set_size_inches(6,2)
+niter = len(dct['losses'])
+
+plt.plot(np.r_[0:niter],dct['losses'])
+plt.ylabel("NLL")
+plt.savefig('local_minima_example_losses.png', dpi=300)
+plt.xlabel("Iteration")
+
+plt.tight_layout()
+plt.savefig('local_minima_example_losses.png', dpi=300)
+
 # %% convex combs
 (alphas,convex_comb_losses) = dct['convex_comb_losses']
-plt.gcf().set_size_inches(4,2)
+plt.gcf().set_size_inches(6,2)
 plt.plot(alphas,convex_comb_losses)
-plt.ylabel("negative\nlog likelihood")
-plt.xticks([0,1],['truth','guess'])
-plt.xlabel("one-dimensional family of\nguesses for waveform distribution")
+plt.ylabel("NLL")
+plt.xticks([0,.5,1],['Truth','Equal mixture','Local Optimum'])
+plt.grid(True)
 plt.tight_layout()
+plt.savefig('local_minima_example_convex_comb.png', dpi=300)
 
-# %% say a bit about the most likely patterns
 
-# say a bit about the most likely patterns according to learned model
+# %% plot tail of params
+
+plt.gcf().set_size_inches(6,2)
+n_params = len(params)
 npp = np.argsort(params.detach().numpy())
-print('most likely patterns in the guess')
-print(f'.   [off] --> pmf is {params[0].item()}')
-for p in npp[-10:][::-1]:
-    print('.  ',contrib_pattern[p], f'--> pmf is {params[p].item():.5f}',f"(p# = {p:02d}, true pmf is {secret_v[p].item()})")
-
-# same, but sorting by truth
-npp = np.argsort(secret_v.detach().numpy())
-print('\nmost likely patterns in the truth')
-print(f'.   [off] --> pmf is {params[0].item()}')
-for p in npp[-10:][::-1]:
-    print('.  ',contrib_pattern[p], f'--> pmf is {params[p].item():.5f}',f"(p# = {p:02d}, true pmf is {secret_v[p].item()})")
-
-# comparing initial guess and truth for those same patterns
-print('\nmost likely patterns in the truth, compared with initial guess')
-print(f'.   [off] --> pmf is {params[0].item()}')
-for p in npp[-10:][::-1]:
-    print('.  ',contrib_pattern[p], f'--> initial guess is {initial_guess_v[p].item():.5f}',f"(p# = {p:02d}, true pmf is {secret_v[p].item()})")
+npp = npp[npp != 0]
+plt.plot(np.r_[1:n_params], params[npp], 'o',label='Local Minimum')
+plt.plot(np.r_[1:n_params], secret_v[npp], '+',label='Truth')
+plt.plot(np.r_[1:n_params], initial_guess_v[npp], 'x',label='Initial Guess')
+plt.gca().set_yscale('log')
+plt.xticks([])
+plt.xlabel("Parameters (sorted by value at local minimum)")
+plt.ylabel("Probability")
+plt.legend()
+plt.savefig('local_minima_example_parameter_magnitudes.png', dpi=300)
+# %%
