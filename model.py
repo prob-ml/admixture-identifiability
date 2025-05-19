@@ -101,7 +101,8 @@ def fit_contribution_pmf(observation_pmf,contrib_shape,
         proposed_contribution_pmf = parameters_to_contribution_pmf(params, contrib_shape, contrib_pattern)
         if true_contrib_pmf is not None:
             mask = true_contrib_pmf!=0
-            secret_losses.append(torch.sum((proposed_contribution_pmf[mask] - true_contrib_pmf[mask]) ** 2).item())
+            secret_losses.append(
+                (proposed_contribution_pmf[mask] - true_contrib_pmf[mask]).abs().sum().item())
 
         newval = params*params.grad
 
