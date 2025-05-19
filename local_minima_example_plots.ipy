@@ -1,0 +1,54 @@
+# %% imports
+%load_ext autoreload
+%autoreload 2
+
+import model
+import torch
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import time
+import pickle
+
+model.logger.setLevel("INFO")
+
+# %% load results
+
+with open('local_minima_example.pkl', 'rb') as f:
+    dct = pickle.load(f)
+
+params = torch.tensor(dct['params'], dtype=torch.float64)
+contrib_pattern = torch.tensor(dct['contrib_pattern'], dtype=torch.int)
+secret_v = torch.tensor(dct['secret_v'], dtype=torch.float64)
+initial_guess_v = torch.tensor(dct['initial_guess_v'], dtype=torch.float64)
+
+# %% convex combs
+(alphas,convex_comb_losses) = dct['convex_comb_losses']
+plt.gcf().set_size_inches(4,2)
+plt.plot(alphas,convex_comb_losses)
+plt.ylabel("negative\nlog likelihood")
+plt.xticks([0,1],['truth','guess'])
+plt.xlabel("one-dimensional family of\nguesses for waveform distribution")
+plt.tight_layout()
+
+# %% say a bit about the most likely patterns
+
+# say a bit about the most likely patterns according to learned model
+npp = np.argsort(params.detach().numpy())
+print('most likely patterns in the guess')
+print(f'.   [off] --> pmf is {params[0].item()}')
+for p in npp[-10:][::-1]:
+    print('.  ',contrib_pattern[p], f'--> pmf is {params[p].item():.5f}',f"(p# = {p:02d}, true pmf is {secret_v[p].item()})")
+
+# same, but sorting by truth
+npp = np.argsort(secret_v.detach().numpy())
+print('\nmost likely patterns in the truth')
+print(f'.   [off] --> pmf is {params[0].item()}')
+for p in npp[-10:][::-1]:
+    print('.  ',contrib_pattern[p], f'--> pmf is {params[p].item():.5f}',f"(p# = {p:02d}, true pmf is {secret_v[p].item()})")
+
+# comparing initial guess and truth for those same patterns
+print('\nmost likely patterns in the truth, compared with initial guess')
+print(f'.   [off] --> pmf is {params[0].item()}')
+for p in npp[-10:][::-1]:
+    print('.  ',contrib_pattern[p], f'--> initial guess is {initial_guess_v[p].item():.5f}',f"(p# = {p:02d}, true pmf is {secret_v[p].item()})")

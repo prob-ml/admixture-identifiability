@@ -44,7 +44,7 @@ contribution_pmf = model.parameters_to_contribution_pmf(
     secret_v, contrib_shape, contrib_pattern)
 
 # make initial guess
-guess_patterns=[17,3,19,9,13,14,15,11,4]
+guess_patterns=[17,3,19,9,13,14,15,11,4,16,10]
 initial_guess_v= torch.full((n_params,), .01, dtype=torch.float64, device=device)
 initial_guess_v[0] = 1.0
 print('\npatterns in initial guess')
@@ -97,20 +97,6 @@ guess_contribution_pmf = model.parameters_to_contribution_pmf(
     params, contrib_shape, contrib_pattern)
 guess_observation_pmf = model.contribution_pmf_to_observation_pmf(guess_contribution_pmf, n)
 
-# plot losses
-plt.gcf().set_size_inches(2,2)
-plt.plot(losses[len(losses)//2:])
-
-with open('local_minima_example.pkl', 'wb') as f:
-    pickle.dump(
-        {
-            'params': params.detach().cpu().numpy(),
-            'secret_v': secret_v.detach().cpu().numpy(),
-            'losses': losses,
-            'secret_losses': secret_losses,
-            'contrib_pattern': contrib_pattern.detach().cpu().numpy(),
-            'n': n,
-        })
 
 # %% determine gradient at the final guess
 params_clone = torch.nn.Parameter(params.clone())
@@ -120,14 +106,9 @@ guess_observation_pmf = model.contribution_pmf_to_observation_pmf(guess_contribu
 mask = guess_observation_pmf!=0
 loss = -torch.sum(observation_pmf[mask] * torch.log(guess_observation_pmf[mask]))
 loss.backward()
-grad = params_clone.grad.clone()
-mask = params_clone>1e-10
-grad = torch.where(mask, grad, torch.zeros_like(grad)) # zero out gradients for zero params
-grad[mask] = grad[mask] - grad[mask].mean() # project to zero mean gradients
-print(grad)
-print('max mag',grad.abs().max())
+final_grad = params_clone.grad
 
-# %% plot loss in convex combination between final guess for contrib_pmf truth about contrib_pmf
+# %% calculate loss in convex combination between final guess for contrib_pmf truth about contrib_pmf
 mask = observation_pmf != 0
 convex_comb_losses = []
 alphas = np.r_[0:1:20j]
@@ -138,36 +119,22 @@ for i,alpha in enumerate(alphas):
     convex_observation_pmf = model.contribution_pmf_to_observation_pmf(convex_pmf, n)
     loss = -torch.sum(observation_pmf[mask] * torch.log(convex_observation_pmf[mask]))
     convex_comb_losses.append(loss.item())
-plt.gcf().set_size_inches(4,2)
-plt.plot(alphas,convex_comb_losses)
-plt.ylabel("negative\nlog likelihood")
-plt.xticks([0,1],['truth','guess'])
-plt.xlabel("one-dimensional family of\nguesses for waveform distribution")
-plt.tight_layout()
 
-# check whether our guess is at edge of the convex hull
-print('least likely atom',params.min())
+# %% save the results
 
-# say a bit about the most likely patterns
-npp = np.argsort(params.detach().numpy())
-print('most likely patterns in the guess')
-print(f'.   [off] --> pmf is {params[0].item()}')
-for p in npp[-10:][::-1]:
-    print('.  ',contrib_pattern[p], f'--> pmf is {params[p].item():.5f}',f"(p# = {p}, true pmf is {secret_v[p].item()})")
+with open('local_minima_example.pkl', 'wb') as f:
+    pickle.dump(
+        {
+            'params': params.detach().cpu().numpy(),
+            'secret_v': secret_v.detach().cpu().numpy(),
+            'observation_pmf': observation_pmf.detach().cpu().numpy(),
+            'losses': losses,
+            'secret_losses': secret_losses,
+            'contrib_pattern': contrib_pattern.detach().cpu().numpy(),
+            'initial_guess_v': initial_guess_v.detach().cpu().numpy(),
+            'n': n,
+            'convex_comb_losses': (alphas,convex_comb_losses),
+            'final_grad': final_grad.detach().cpu().numpy(),
+        },f)
 
-# and in the reverse
-npp = np.argsort(secret_v.detach().numpy())
-print('\nmost likely patterns in the truth')
-print(f'.   [off] --> pmf is {params[0].item()}')
-for p in npp[-10:][::-1]:
-    print('.  ',contrib_pattern[p], f'--> pmf is {params[p].item():.5f}',f"(p# = {p}, true pmf is {secret_v[p].item()})")
-
-
-# %% say a bit about the most likely patterns
-npp = np.argsort(params.detach().numpy())
-pvals = params.detach().numpy()[npp[-12:][::-1]]
-pvals = np.exp(pvals); pvals = pvals/pvals.sum()
-local_contribs = contrib_pattern.detach().numpy()[npp[-12:][::-1]+1]
-for p, contrib in zip(pvals, local_contribs):
-    print('   ',contrib, f'--> probability is {p:.3f}')
 
