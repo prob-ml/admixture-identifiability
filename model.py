@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 
 def contribution_sparsity_pattern_E0(N: List[int]):
     """
-    Consider the space of pmfs on a nonnegative integer vector of length len(shape), with maximum 
+    Consider the space of pmfs on a nonnegative integer vector of length len(shape), with maximum
     values given by shape.  The native dimension of this space is the product of the shape - 1.
-    However, we are only interested in PMFs that, with probability 1, guarantee that the vector 
+    However, we are only interested in PMFs that, with probability 1, guarantee that the vector
     U ~ PMF satisfies
 
     U[0]*0 + U[1]*1 + ... + U[N-1]*(N-1) = sum(U)*(N-1)/2
@@ -81,7 +81,7 @@ def fit_contribution_pmf(observation_pmf,contrib_shape,
     # run gradient descent
     losses=[]
     secret_losses=[]
-   
+
     for i in range(n_iter):
         if params.grad is not None:
             params.grad.zero_()
@@ -122,7 +122,7 @@ def parameters_to_contribution_pmf(v: torch.Tensor,
            function, where Mj = max(sparsity_pattern[:,j]) + 1
     """
     K, N = sparsity_pattern.shape
-    
+
     dims = max_vals   # [M1, M2, ..., MN]
 
     # 2) initialize pmf to 0
@@ -155,7 +155,7 @@ def build_mask_by_padding(
 ) -> torch.Tensor:
     '''
     In essence, this:
-    
+
         # slices = [
         #     slice(int(shift[k]), int(shift[k]) + patch_shape[k])
         #     for k in range(N)
@@ -262,7 +262,7 @@ def contribution_pmf_to_observation_pmf(
         pmf will have (n-N+1) axes
 
     For example, let's say prior is a 2D tensor with shape (3, 4), and n = 5.
-    Then we consider drawing 5 2d vectors, independently using pi, and summing 
+    Then we consider drawing 5 2d vectors, independently using pi, and summing
     them up as follows
 
     U0 = (U0_0, U0_1)
@@ -270,7 +270,7 @@ def contribution_pmf_to_observation_pmf(
     U2 =             (U2_0, U2_1)
     U3 =                   (U3_0, U3_1)
     U4 =                         (U4_0, U4_1)       +
-    ------------------------------------------------------- 
+    -------------------------------------------------------
     X  =       (X0,   X1,   X2,   X3)
 
     Here M₁=3 and M₂=4 and N=2 and n=5.  We have that
@@ -278,8 +278,8 @@ def contribution_pmf_to_observation_pmf(
         0 <= Ui_0 < 3
         0 <= Ui_1 < 4
 
-    So 
-    
+    So
+
         0 <= Xi < 6 = 2+4-1
 
     The number of axes in X is 4, because n-N+1=5-2+1=4.  The number of columns in the summation
@@ -292,7 +292,7 @@ def contribution_pmf_to_observation_pmf(
     U2 =             (U2_0, U2_1, U2_2)
     U3 =                   (U3_0, U3_1, U3_2)
     U4 =                         (U4_0, U4_1, U4_2)       +
-    ------------------------------------------------------- 
+    -------------------------------------------------------
     X  =             (X0,   X1,   X2)
 
     Number of columns in the summation is 7, because n+N-1=5+3-1=7.  Buffer on either side

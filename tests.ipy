@@ -1,0 +1,100 @@
+# %% imports
+%load_ext autoreload
+%autoreload 2
+
+import model
+import torch
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import time
+import pickle
+
+model.logger.setLevel("INFO")
+
+# %% check that contribution_pmf_to_observation_pmf
+# seems to be about right
+
+n = 7
+
+pmf = torch.rand(2, 3, 2, 2)
+# pmf = torch.zeros(1, 3, 1, 2)
+# pmf[0, 0, 0, 0] = .95
+# pmf[0, 2, 0, 0] = .05
+
+N=pmf.ndim
+pmf = pmf / pmf.sum()
+
+# get theoretical observation pmf
+observation_pmf = model.contribution_pmf_to_observation_pmf(pmf, n)
+
+# make a mazillion samples
+mc_samples = 5000
+
+observed_sample_counts = torch.zeros_like(observation_pmf)
+for i in range(mc_samples):
+    U_samples = torch.multinomial(pmf.flatten(), n, replacement=True)
+    U_samples_as_vectors = torch.stack(
+        torch.unravel_index(U_samples, pmf.shape),
+        dim=1,
+    )
+    X = torch.zeros(n+N-1, dtype=torch.int)
+    for j in range(n):
+        X[j:j+N] += U_samples_as_vectors[j, :]
+
+    X_seen = X[N-1:1-N]
+
+    observed_sample_counts[tuple(X_seen)] += 1
+
+# should be close to 0
+print((observed_sample_counts/mc_samples - observation_pmf).abs().max())
+
+
+# %% example gradienting
+
+# make some ground truth
+n = 5
+contrib_shape = (2, )*3
+N=len(contrib_shape)
+contrib_pattern,contrib_pattern_idxs = model.contribution_sparsity_pattern_E0(contrib_shape)
+n_params = len(contrib_pattern)
+secret_v = torch.randn(n_params)
+contribution_pmf = model.parameters_to_contribution_pmf(
+    secret_v, contrib_shape, contrib_pattern)
+
+# first let us check that we can convolve pmfs safely
+guess_v = torch.rand(n_params)
+guess_v = guess_v/guess_v.sum()
+
+guess_v1 = guess_v.clone().requires_grad_()
+guess_contribution_pmf = model.parameters_to_contribution_pmf(
+    guess_v1, contrib_shape, contrib_pattern)
+convolved1 = model.convolve_n_pmfs([
+    guess_contribution_pmf[:,    :,    :,    None, None, None, None],
+    guess_contribution_pmf[None, :,    :,    :,    None, None, None],
+    guess_contribution_pmf[None, None, :,    :,    :,    None, None],
+    guess_contribution_pmf[None, None, None, :,    :,    :,    None],
+    guess_contribution_pmf[None, None, None, None, :,    :,    :   ],
+])
+convolved1 = torch.sum(convolved1, dim=(0,1,5,6))
+
+guess_v2 = guess_v.clone().requires_grad_()
+guess_contribution_pmf = model.parameters_to_contribution_pmf(
+    guess_v2, contrib_shape, contrib_pattern)
+convolved2 = model.contribution_pmf_to_observation_pmf(guess_contribution_pmf, n)
+
+mask = convolved1!=0
+loss1 = torch.sum(torch.log(convolved1[mask]))
+loss1.backward()
+grad1 = guess_v1.grad
+
+mask = convolved2!=0
+loss2 = torch.sum(torch.log(convolved2[mask]))
+loss2.backward()
+grad2 = guess_v2.grad
+
+# Confirm that loss1 is close to loss2
+assert torch.allclose(loss1, loss2, atol=1e-6), f"loss1 ({loss1}) and loss2 ({loss2}) are not close"
+
+# Confirm that grad1 is close to grad2
+assert torch.allclose(grad1, grad2, atol=1e-6), "grad1 and grad2 are not close"
