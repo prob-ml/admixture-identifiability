@@ -9,15 +9,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def render_latent_U(U_collection: torch.Tensor):
-    """
-    Print the U collection in a readable format.
-    """
-    result = torch.zeros(U_collection.shape[0], U_collection.shape[0] + U_collection.shape[1] -1,dtype=torch.int)
-    for i in range(U_collection.shape[0]):
-        result[i,i:i+U_collection.shape[1]] = U_collection[i, :]
-    return result
-
 def contribution_sparsity_pattern_E0(N: List[int]):
     """
     Consider the space of pmfs on a nonnegative integer vector of length len(shape), with maximum 
@@ -48,101 +39,75 @@ def contribution_sparsity_pattern_E0(N: List[int]):
     return torch.tensor(Us, dtype=torch.int),torch.tensor(idxs, dtype=torch.int)
 
 def fit_loss_fn(v, observation_pmf, contrib_shape, contrib_pattern, n):
-    proposed_contribution_logpmf = parameters_to_contribution_logpmf(v, contrib_shape, contrib_pattern)
-    proposed_observation_logpmf = contribution_logpmf_to_observation_logpmf(
-        proposed_contribution_logpmf, n
+    proposed_contribution_pmf = parameters_to_contribution_pmf(v, contrib_shape, contrib_pattern)
+    proposed_observation_pmf = contribution_pmf_to_observation_pmf(
+        proposed_contribution_pmf, n,
     )
 
-    # for every location where the proposed pmf if neginf, the observation had better be 0
-    # if not torch.all(observation_pmf[torch.isneginf(proposed_observation_logpmf)] ==0):
-    #     print("proposed_observation_logpmf", proposed_observation_logpmf.flatten())
-    #     print("observation_pmf", observation_pmf.flatten())
-    #     raise ValueError("Mismatch in -inf patterns between proposed and observed logpmfs")
-
     mask = observation_pmf != 0
-    loss = -torch.sum(observation_pmf[mask] * proposed_observation_logpmf[mask])
+    loss = -torch.sum(observation_pmf[mask] * torch.log(proposed_observation_pmf[mask]))
     return loss
 
-    # return torch.mean((observation_pmf - torch.exp(proposed_observation_logpmf))**2)
-
-def fit_contribution_logpmf(observation_pmf,contrib_shape,
-                            true_contrib_logpmf=None,n_iter=1000, log_every=50,
-                            initial_guess = None, lr=1, optmethod ='adam', momentum=0.9):
+def fit_contribution_pmf(observation_pmf,contrib_shape,
+                            true_contrib_pmf=None,n_iter=1000, log_every=1,
+                            initial_guess = None):
     # get the sparsity pattern
     contrib_pattern,_ = contribution_sparsity_pattern_E0(contrib_shape)
 
-    # if we have truth, exp it
-    if true_contrib_logpmf is not None:
-        true_contrib_pmf = torch.exp(true_contrib_logpmf)
-
     # make a random proposal
     if initial_guess is not None:
+        initial_guess = initial_guess / initial_guess.sum()
         params = torch.nn.Parameter(initial_guess.clone())
     else:
-        params = torch.nn.Parameter(torch.rand(contrib_pattern.shape[0]))
+        guess = torch.rand(contrib_pattern.shape[0], dtype = observation_pmf.dtype, device = observation_pmf.device)
+        guess = guess / guess.sum()
+        params = torch.nn.Parameter(guess)
 
     # get number of times we have to sample from contrib for each observation
     n = len(observation_pmf.shape) + len(contrib_shape) -1
 
     # sanity check shapes
-    proposed_contribution_logpmf = parameters_to_contribution_logpmf(params, contrib_shape, contrib_pattern)
-    proposed_observation_logpmf = contribution_logpmf_to_observation_logpmf(
-        proposed_contribution_logpmf, n,
+    proposed_contribution_pmf = parameters_to_contribution_pmf(params, contrib_shape, contrib_pattern)
+    proposed_observation_pmf = contribution_pmf_to_observation_pmf(
+        proposed_contribution_pmf, n,
     )
-    if tuple(proposed_contribution_logpmf.shape) != tuple(contrib_shape):
-        raise ValueError(f"proposed_contribution_logpmf shape {tuple(proposed_contribution_logpmf.shape)} "
+    if tuple(proposed_contribution_pmf.shape) != tuple(contrib_shape):
+        raise ValueError(f"proposed_contribution_pmf shape {tuple(proposed_contribution_pmf.shape)} "
                          f"does not match contrib_shape {contrib_shape}")
-    if proposed_observation_logpmf.shape != observation_pmf.shape:
-        raise ValueError(f"proposed_observation_pmf shape {proposed_observation_logpmf.shape} "
+    if proposed_observation_pmf.shape != observation_pmf.shape:
+        raise ValueError(f"proposed_observation_pmf shape {proposed_observation_pmf.shape} "
                          f"does not match observation_pmf shape {observation_pmf.shape}")
 
     # run gradient descent
     losses=[]
     secret_losses=[]
-    if optmethod == 'adam':
-        optimizer = torch.optim.Adam([params], lr=lr)
-    elif optmethod == 'sgd':
-        optimizer = torch.optim.SGD([params], lr=lr,momentum=momentum)
-    elif optmethod == 'lbfgs':
-        optimizer = torch.optim.LBFGS([params], lr=lr, line_search_fn='strong_wolfe')
-    else:
-        raise ValueError(f"Unknown optimizer {optmethod}")
-
-    def closure():
-        optimizer.zero_grad()
-        loss = fit_loss_fn(params, observation_pmf, contrib_shape, contrib_pattern, n)
-        if torch.isnan(loss):
-            raise ValueError("Loss is NaN. Aborting loop.")
-        loss.backward()
-        return loss
-
+   
     for i in range(n_iter):
-        if optmethod == 'lbfgs':
-            loss = optimizer.step(closure)
-        else:
-            loss = closure()
-            optimizer.step()
+        if params.grad is not None:
+            params.grad.zero_()
+        loss = fit_loss_fn(params, observation_pmf, contrib_shape, contrib_pattern, n)
+        losses.append(loss.item())
+        loss.backward()
+
+        proposed_contribution_pmf = parameters_to_contribution_pmf(params, contrib_shape, contrib_pattern)
+        if true_contrib_pmf is not None:
+            mask = true_contrib_pmf!=0
+            secret_losses.append(torch.sum((proposed_contribution_pmf[mask] - true_contrib_pmf[mask]) ** 2).item())
+
+        newval = params*params.grad
+        newval = newval / newval.sum()
+
+        params.data = newval
 
         if i % log_every == 0:
-            losses.append(loss.item())
-
-            if true_contrib_logpmf is not None:
-                proposed_contribution_logpmf = parameters_to_contribution_logpmf(
-                    params, contrib_shape, contrib_pattern)
-                proposed_contribution_pmf = torch.exp(proposed_contribution_logpmf)
-                mask = ~torch.isneginf(true_contrib_logpmf)
-                secret_losses.append(torch.sum((proposed_contribution_logpmf[mask] - true_contrib_logpmf[mask]) ** 2).item())
-
             logger.info(
                 f"Iteration {i}: Loss = {losses[-1]}, "
-                f"Secret Loss = {secret_losses[-1] if true_contrib_logpmf is not None else 'N/A'}"
+                f"Secret Loss = {secret_losses[-1] if true_contrib_pmf is not None else 'N/A'}"
             )
 
-            
-            
     return params, losses, secret_losses
 
-def parameters_to_contribution_logpmf(v: torch.Tensor,
+def parameters_to_contribution_pmf(v: torch.Tensor,
                                    max_vals: List[int],
                                    sparsity_pattern: torch.LongTensor) -> torch.Tensor:
     """
@@ -153,15 +118,15 @@ def parameters_to_contribution_logpmf(v: torch.Tensor,
 
     Returns:
     -------
-      logpmf: tensor of shape (M1, M2, …, MN), a valid log probability mass
+      pmf: tensor of shape (M1, M2, …, MN), a valid probability mass
            function, where Mj = max(sparsity_pattern[:,j]) + 1
     """
     K, N = sparsity_pattern.shape
     
     dims = max_vals   # [M1, M2, ..., MN]
 
-    # 2) initialize log‑pmf to –∞
-    logpmf = torch.full(dims, -math.inf, dtype=v.dtype, device=v.device)
+    # 2) initialize pmf to 0
+    pmf = torch.zeros(dims, dtype=v.dtype, device=v.device)
 
     # 3) build an N‑tuple of length‑K index tensors for advanced indexing
     #    e.g. if N==3, idx = (sparsity_pattern[:,0],
@@ -169,24 +134,23 @@ def parameters_to_contribution_logpmf(v: torch.Tensor,
     #                         sparsity_pattern[:,2])
     idx = tuple(sparsity_pattern[:, dim] for dim in range(N))
 
-    # 4) scatter your scores (prepended with zero) into the log‑pmf
-    zero_tensor = torch.zeros(1, device=v.device, dtype=v.dtype)
-    logpmf[idx] = torch.cat([zero_tensor, v])
+    # 4) scatter your scores into the pmf
+    pmf[idx] = v
 
     # 5) done
-    return logpmf - torch.logsumexp(logpmf.view(-1), dim=0)
+    return pmf
 
 
-def convolve_n_logpmfs(logpmfs: List[torch.Tensor]) -> torch.Tensor:
-    result = convolve_logpmfs(logpmfs[0], logpmfs[1])
-    for logpmf in logpmfs[2:]:
-        result = convolve_logpmfs(result, logpmf)
+def convolve_n_pmfs(pmfs: List[torch.Tensor]) -> torch.Tensor:
+    result = convolve_pmfs(pmfs[0], pmfs[1])
+    for pmf in pmfs[2:]:
+        result = convolve_pmfs(result, pmf)
     return result
 
 
 def build_mask_by_padding(
-    full_shape: List[int],      # e.g. list(logsigma.shape)
-    patch_shape: List[int],     # e.g. list(logpi.shape)
+    full_shape: List[int],      # e.g. list(sigma.shape)
+    patch_shape: List[int],     # e.g. list(pi.shape)
     shift: torch.Tensor         # 1D tensor of length N giving the offset
 ) -> torch.Tensor:
     '''
@@ -225,9 +189,9 @@ def build_mask_by_padding(
 
     return mask
 
-def convolve_logpmfs(
-    logpi:  torch.Tensor,  # shape = (M₁+1, …, M_N+1)
-    logtau: torch.Tensor   # shape = (L₁+1, …, L_N+1)
+def convolve_pmfs(
+    pi:  torch.Tensor,  # shape = (M₁+1, …, M_N+1)
+    tau: torch.Tensor   # shape = (L₁+1, …, L_N+1)
 ) -> torch.Tensor:
     """
     Compute the PMF of X+Y when X∼π and Y∼τ are independent N‑dim integer vectors.
@@ -235,94 +199,46 @@ def convolve_logpmfs(
 
     Args
     ----
-    logpi  : Tensor of shape (M1+1, …, M_N+1)
-    logtau : Tensor of shape (L1+1, …, L_N+1)
+    pi  : Tensor of shape (M1+1, …, M_N+1)
+    tau : Tensor of shape (L1+1, …, L_N+1)
 
     Returns
     -------
     sigma : Tensor of shape (M1+L1+1, …, M_N+L_N+1)
         sigma[x] = sum_{y+z = x} pi[y] * tau[z].
     """
-    if logpi.ndim != logtau.ndim:
+    if pi.ndim != tau.ndim:
         raise ValueError("π and τ must have the same dimensionality")
-    N = logpi.ndim
+    N = pi.ndim
 
     # 1) Allocate the result array
-    out_shape = [logpi.shape[k] + logtau.shape[k] - 1 for k in range(N)]
-    logsigma = torch.ones(out_shape, dtype=logpi.dtype)*(-math.inf)
+    out_shape = [pi.shape[k] + tau.shape[k] - 1 for k in range(N)]
+    sigma = torch.zeros(out_shape, dtype=pi.dtype, device=pi.device)
 
-    # 2a) Find where tau is nonzero (skip all the zero‐mass shifts)
+    # 2) Find where tau is nonzero (skip all the zero‐mass shifts)
     #    idx has shape (n_nonzero, N), probs has shape (n_nonzero,)
-    nni = ~torch.isneginf(logtau)
+    nni = tau!=0
     idx = torch.nonzero(nni)
-    logprobs = logtau[nni]
-
-    # 2b) Find where pi is nonzero (skip all the zero‐mass shifts)
-    logpi_submask = ~torch.isneginf(logpi.view(-1))
-    logpi_submasked = logpi.view(-1)[logpi_submask]
+    probs = tau[nni]
 
     # 3) For each z with P[Y=z] = p_z, shift π by z and accumulate
     #
     #    sigma[ z + i ] += p_z * pi[i] for each integer vector i
     #    We do that by slicing into the big sigma tensor.
-    #
-    #    in logspace, this is log(sigma[ z + i ]) = log(exp(logsigma[ z + i ]) + exp(logp_z+logpi[i]))
-    for shift, logp_z in zip(idx, logprobs):
+    for shift, p_z in zip(idx, probs):
         # build slices:  slice(shift[k], shift[k] + pi.shape[k])  for each axis k
-        # slices = [
-        #     slice(int(shift[k]), int(shift[k]) + logpi.shape[k])
-        #     for k in range(N)
-        # ]
-        # mask = torch.zeros(logsigma.shape, dtype=torch.bool)
-        # mask[tuple(slices)] = True
+        slices = [
+            slice(int(shift[k]), int(shift[k]) + pi.shape[k])
+            for k in range(N)
+        ]
 
-        mask = build_mask_by_padding(logsigma.shape, logpi.shape, shift)
+        sigma[slices] += pi * p_z
 
-        # (note that mask.sum() is always equal to the number of elements in logpi)
-
-        # if life were simple, we would just do 
-        #              logsigma[mask] = logaddexp(logsigma[mask],logp_z + logpi)
-        # but we have to deal with -infs and grad issues, so we do 
-        #              logsigma[mask][submask] = logaddexp(logsigma[mask][submask],logp_z + logpi_submasked)
-        # but we have to deal with the fact that in-place doesn't work, so we have to do this in two
-        # steps of masked_scatter
-
-        # get new values
-        logsigma_mask = logsigma[mask]
-        new_values = torch.logaddexp(logsigma_mask[logpi_submask], logp_z + logpi_submasked)
-
-        # scatter them back in, somewhat tediously
-        transformed_values = logsigma_mask.masked_scatter(logpi_submask, new_values)
-        logsigma = logsigma.masked_scatter(mask, transformed_values)
-
-    return logsigma
-
-
-def marginalize_safe(logprior_reshaped,buffer_summing_columns: List[int]) -> torch.Tensor:
-    # we want to marginalize out the first axes and last axes
-    # but in logsumexp land with gradients, this can create headaches
-    # logsumexp([a,b]) does terrible things when a and b are -inf
-    # to avoid this, we first compute the values in a way that is safe for -infs
-    # in the backward pass because it returns finite value
-    logprior_reshaped_inexact = torch.logsumexp(
-        torch.clamp(logprior_reshaped,min=-1e20), dim=buffer_summing_columns, keepdim=True)
-
-    # we then determine where the -infs should be in the final product
-    mask = torch.isneginf(torch.logsumexp(
-        logprior_reshaped, dim=buffer_summing_columns, keepdim=True))
-
-    # put back -infs where they ought to go
-    neginf = torch.full_like(logprior_reshaped_inexact, -math.inf)
-    logprior_reshaped = torch.where(mask,neginf,logprior_reshaped_inexact)
-
-    # and squeeze on either side
-    logprior_reshaped = logprior_reshaped.squeeze(dim=buffer_summing_columns)
-
-    return logprior_reshaped
+    return sigma
 
 # @torch.jit.script
-def contribution_logpmf_to_observation_logpmf(
-    logprior: torch.Tensor,  # shape = (M₁, …, M_N)
+def contribution_pmf_to_observation_pmf(
+    prior: torch.Tensor,  # shape = (M₁, …, M_N)
     n: int,  # length of stochastic process
 ) -> torch.Tensor:
     """
@@ -383,7 +299,7 @@ def contribution_logpmf_to_observation_logpmf(
     is 2, because N-1=3-1=2.
     """
 
-    N = logprior.ndim
+    N = prior.ndim
     if n < N:
         raise ValueError(f"Length n={n} must be at least the vector dimension N={N}")
     T = n - N + 1  # number of X coordinates
@@ -395,23 +311,23 @@ def contribution_logpmf_to_observation_logpmf(
     # make n versions of the prior
     # in the middle they will all be the same
     # but on the edge we must marginalize some of the axes
-    logpmfs=[]
+    pmfs=[]
 
     for i in range(n):
         # construct reshaped prior with shape (1,1,...,1,M₁,M₂,...,M_N,1,...,1)
         # where the 1s are in the right places
         # shp = [1] * summation_columns
-        # shp[i:i+N] = list(logprior.shape)
-        shp: List[int] = [1] * i + list(logprior.shape) + [1] * (summation_columns - i-len(logprior.shape))
-        logprior_reshaped = logprior.reshape(shp)
+        # shp[i:i+N] = list(prior.shape)
+        shp: List[int] = [1] * i + list(prior.shape) + [1] * (summation_columns - i-len(prior.shape))
+        prior_reshaped = prior.reshape(shp)
 
         if N>1:
             # and squeeze on either side
-            logprior_reshaped = marginalize_safe(logprior_reshaped,buffer_summing_columns)
+            prior_reshaped = torch.sum(prior_reshaped, buffer_summing_columns)
 
-        logpmfs.append(logprior_reshaped)
+        pmfs.append(prior_reshaped)
 
     # convolve together
-    convolved = convolve_n_logpmfs(logpmfs)
+    convolved = convolve_n_pmfs(pmfs)
 
     return convolved
