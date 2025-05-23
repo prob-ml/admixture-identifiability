@@ -1,0 +1,117 @@
+# %% imports
+%load_ext autoreload
+%autoreload 2
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+import model
+import torch
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import time
+import pickle
+
+model.logger.setLevel("INFO")
+
+# %% setup problem framework
+
+# make the framework of the problem
+n = 8 # T = n-1
+contrib_shape = (4, )*3
+N=len(contrib_shape)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+rng = torch.Generator(device=device)
+
+# %% print blending pmfs
+
+p0_options = [0.95, 0.9, 0.8, 0.6]
+markers = ['o', 's', '^', 'D', 'x']
+
+plt.gcf().set_size_inches(3,2.7)
+for i,p0 in enumerate(p0_options):
+    plt.plot(model.n_sources_pmf(n,p0),label=f'$p_0$={p0}', marker=markers[i], markersize=5)
+plt.xlabel('Number of sources\nin each observation')
+plt.ylabel('Probability')
+plt.legend(framealpha=1.0)
+plt.tight_layout()
+plt.yticks([0, .25, .5, .75, 1])
+plt.grid(True)
+plt.savefig('plots/identifiability_recap_n_sources.png', dpi=300)
+
+# %% run simulations with various p0 and n_samples
+
+n_iter = 100
+n_sample_options = [None,1000,100,10]
+n_reseeds = 5
+
+simresults = {}
+
+for p0 in p0_options:
+    for n_samples in n_sample_options:
+        print(p0, n_samples)
+        rng.manual_seed(123)
+        for i in range(n_reseeds):
+            simresults[p0, n_samples, i]=model.run_simulation(
+                n,
+                contrib_shape,
+                device,
+                p0,
+                n_samples,
+                rng,
+                n_iter,
+            )
+
+# %% save
+
+# with open('identifiability_recap.pkl', 'wb') as f:
+#     pickle.dump({
+#         'n_iter': n_iter,
+#         'n_sample_options': n_sample_options,
+#         'p0_options': p0_options,
+#         'n_reseeds': n_reseeds,
+#         'results': simresults,
+#     }, f)
+
+
+# %% check loss convergences
+
+plt.subplot(1,2,1)
+for x in simresults:
+    best = simresults[x].secret_losses[-1]
+    plt.plot(np.array(simresults[x].secret_losses) - best)
+
+plt.subplot(1,2,2)
+for x in simresults:
+    best = simresults[x].losses[-1]
+    plt.plot(np.array(simresults[x].losses) - best)
+
+# %% plot
+
+with open('identifiability_recap.pkl', 'rb') as f:
+    dct = pickle.load(f)
+
+simresults = dct['results']
+
+plt.gcf().set_size_inches(3,2.7)
+
+for j,y in enumerate(dct['p0_options']):
+    for k in range(dct['n_reseeds']):
+        tvs = []
+        for i,x in enumerate(dct['n_sample_options']):
+            best_L1 = simresults[y,x,k].secret_losses[-1]
+            best_TV = 0.5 * best_L1
+            tvs.append(best_TV)
+        label = f'$p_0$={y}' if (k==0) else None
+        plt.plot(tvs, f'C{j}', label=label, marker=markers[j], markersize=5)
+
+n_sample_strings = [x if x is not None else '$\infty$' for x in dct['n_sample_options']]
+
+plt.xticks(range(len(dct['n_sample_options'])), n_sample_strings)
+plt.xlabel('$n$')
+plt.ylabel(r'$\delta(\hat \pi,\pi)$')
+plt.legend(framealpha=1.0)
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('plots/identifiability_recap.png', dpi=300)

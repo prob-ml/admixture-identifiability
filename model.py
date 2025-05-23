@@ -1,6 +1,10 @@
 import itertools
 import math
 from typing import List, Iterator
+import dataclasses
+import numpy as np
+import scipy as sp
+import scipy.stats
 
 import torch
 import torch.nn.functional as F
@@ -49,8 +53,8 @@ def fit_loss_fn(v, observation_pmf, contrib_shape, contrib_pattern, n):
     return loss
 
 def fit_contribution_pmf(observation_pmf,contrib_shape,
-                            true_contrib_pmf=None,n_iter=1000, log_every=1,
-                            initial_guess = None, fix_p0=False):
+                            true_contrib_pmf=None,n_iter=1000, log_every=None,
+                            initial_guess = None, fix_p0=True):
     # get the sparsity pattern
     contrib_pattern,_ = contribution_sparsity_pattern_E0(contrib_shape)
 
@@ -114,13 +118,55 @@ def fit_contribution_pmf(observation_pmf,contrib_shape,
 
         params.data = newval
 
-        if i % log_every == 0:
+        if (log_every is not None) and i % log_every == 0:
             logger.info(
                 f"Iteration {i}: Loss = {losses[-1]}, "
                 f"Secret Loss = {secret_losses[-1] if true_contrib_pmf is not None else 'N/A'}"
             )
 
-    return params, losses, secret_losses
+    return params, np.array(losses), np.array(secret_losses)
+
+def sample_observation_pmf(observation_pmf, n_samples, rng):
+    """
+    Sample from the observation PMF.
+
+    Args:
+    ----
+      observation_pmf: Tensor of shape (M₁, M₂, …, M_N)
+      n_samples: int, number of samples to draw
+      rng: random number generator
+
+    Returns:
+    -------
+      resampled_observation_pmf: Tensor of shape (M₁, M₂, …, M_N)
+    """
+    # Ensure the PMF is a valid probability mass function
+    if not torch.allclose(observation_pmf.sum(), torch.tensor(1.0, dtype=observation_pmf.dtype, device=observation_pmf.device)):
+        raise ValueError("The observation PMF must sum to 1.")
+
+    if n_samples is None:
+        return observation_pmf
+
+    # Flatten the observation PMF
+    flat_obs_pmf = observation_pmf.flatten()
+
+    # Sample indices according to the PMF
+    sampled_idxs = torch.multinomial(
+        flat_obs_pmf, num_samples=n_samples, replacement=True, generator=rng)
+
+    # Count occurrences of each index
+    sampled_counts = torch.bincount(
+        sampled_idxs, minlength=len(flat_obs_pmf))
+
+    # Normalize to get the resampled PMF
+    resampled_observation_pmf = sampled_counts.float() / n_samples
+
+    # Reshape and cast back
+    resampled_observation_pmf = resampled_observation_pmf.reshape(observation_pmf.shape)
+    resampled_observation_pmf = resampled_observation_pmf.to(dtype=observation_pmf.dtype)
+
+    return resampled_observation_pmf
+
 
 def parameters_to_contribution_pmf(v: torch.Tensor,
                                    max_vals: List[int],
@@ -346,3 +392,93 @@ def contribution_pmf_to_observation_pmf(
     convolved = convolve_n_pmfs(pmfs)
 
     return convolved
+
+@dataclasses.dataclass
+class SimulationResult:
+    params: torch.Tensor
+    contrib_shape: List[int]
+    losses: np.ndarray
+    secret_losses: np.ndarray
+    observation_pmf: torch.Tensor
+    corrupted_observation_pmf: torch.Tensor
+    secret_v: torch.Tensor
+    initial_guess_v: torch.Tensor
+    n_samples: int
+    n_actual_samples: int
+    n_iter: int
+    n: int
+
+    def to(self, device: torch.device):
+        self.params = self.params.to(device)
+        self.observation_pmf = self.observation_pmf.to(device)
+        self.corrupted_observation_pmf = self.corrupted_observation_pmf.to(device)
+        self.secret_v = self.secret_v.to(device)
+        self.initial_guess_v = self.initial_guess_v.to(device)
+
+    def __post_init__(self):
+        self.params = self.params.detach()
+        self.p0 = self.secret_v[0].item()
+
+    def __repr__(self):
+        return f"SimulationResult(contrib_shape={self.contrib_shape}, " \
+               f"final loss={self.losses[-1]:.3f}, final secret loss={self.secret_losses[-1]:.1e}, " \
+               f"n_samples={self.n_samples}, n_actual_samples={self.n_actual_samples})"
+
+def n_sources_pmf(n,p0):
+    "Return PMF on the total number of sources in each observation"
+    # Binom(n, self.p0)
+    return sp.stats.binom.pmf(np.r_[0:n],n,1-p0)
+
+
+def run_simulation(n, contrib_shape, device, p0, n_samples, rng, n_iter, log_every=None):
+    # setup problem
+    contrib_pattern,contrib_pattern_idxs = contribution_sparsity_pattern_E0(contrib_shape)
+    contrib_pattern = contrib_pattern.to(device)
+    n_params = len(contrib_pattern)
+    secret_v = torch.rand(n_params, dtype=torch.float64, device=device, generator=rng)
+    secret_v[0] = p0
+    secret_v[1:] = (1-p0)*secret_v[1:]/secret_v[1:].sum()
+    contribution_pmf = parameters_to_contribution_pmf(
+        secret_v, contrib_shape, contrib_pattern)
+    observation_pmf = contribution_pmf_to_observation_pmf(contribution_pmf, n)
+
+    # n_samples is supposed to represent number of *nontrivial* samples
+    if n_samples is not None:
+        ptrivial = observation_pmf.view(-1)[0].item()
+        n_actual_samples = int(n_samples / (1 - ptrivial))
+    else:
+        n_actual_samples = None
+
+    corrupted_observation_pmf = sample_observation_pmf(observation_pmf, n_actual_samples, rng)
+
+    # make initial guess
+    initial_guess_v = torch.ones((n_params,), dtype=torch.float64, device=device)
+    initial_guess_v[0] = p0
+    initial_guess_v[1:] = (1-initial_guess_v[0])*initial_guess_v[1:]/initial_guess_v[1:].sum()
+
+    # run EM
+    params, losses, secret_losses = fit_contribution_pmf(
+        corrupted_observation_pmf,
+        contrib_shape,
+        true_contrib_pmf=contribution_pmf,
+        initial_guess=initial_guess_v,
+        n_iter=n_iter,
+        log_every=log_every,
+        fix_p0=True,
+    )
+
+    return SimulationResult(
+        params=params,
+        contrib_shape=contrib_shape,
+        losses=losses,
+        secret_losses=secret_losses,
+        observation_pmf=observation_pmf,
+        corrupted_observation_pmf=corrupted_observation_pmf,
+        secret_v=secret_v,
+        initial_guess_v=initial_guess_v,
+        n_samples=n_samples,
+        n_actual_samples=n_actual_samples,
+        n_iter=n_iter,
+        n= n,
+    )
+
