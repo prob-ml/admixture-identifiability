@@ -23,5 +23,8 @@ This repository contains code for running simulations that test the identifiabil
 ## Files
 
 * `scripts/neuron_spike_simulation.py` create a plot that demonstrates the "deblending" problem.
-* `scripts/model.py` contains an EM algorithm for fitting $\pi$ using knowledge of the law of $X$.
-* `tests.ipy` contain two sanity check tests of the `model.py` code
+* `scripts/emalg.py` contains an EM algorithm for fitting $\pi$ using knowledge of the law of $X$.
+* `scripts/run_finite_data.py` runs the algorithm in cases with finite data
+* `scripts/plot_finite_data_sims.py` plots the results of the above
+* `scripts/run_infinite_data.py` runs the algorithm with infinite data, tracking the optimization progress
+* `scripts/plot_infinite_data_sims.py` plots the results of the above
