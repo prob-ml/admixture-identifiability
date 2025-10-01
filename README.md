@@ -22,7 +22,6 @@ This repository contains code for running simulations that test the identifiabil
 
 ## Files
 
-* `model.py` contains an EM algorithm for fitting $\pi$ using knowledge of the law of $X$.
-* `local_minima_example.ipy` shows how this EM algorithm may be used, and demonstrates a case where a local minima is obtained
-* `local_minima_example_plots.ipy` creates plots that demonstrate the example computed in `local_minima_example.ipy`
+* `scripts/neuron_spike_simulation.py` create a plot that demonstrates the "deblending" problem.
+* `scripts/model.py` contains an EM algorithm for fitting $\pi$ using knowledge of the law of $X$.
 * `tests.ipy` contain two sanity check tests of the `model.py` code
