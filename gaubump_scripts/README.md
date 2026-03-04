@@ -95,6 +95,6 @@ Configuration: $L=3$, $T=20$, `null_prob_true=0.8`, 2000 Phase I steps,
 | `results/true_vs_inferred_U.png` | Scatter: true latent $U$ vs inferred $U$ |
 
 The inferred aggregate posterior shows `frac(|ρ|<0.1) ≈ 24%` compared to
-the true null probability of 80%.  The model is beginning to learn the
+the true null probability of 80%. The model is beginning to learn the
 structure but has not yet tightly recovered the atom — expected for a
 first baby-step run.
