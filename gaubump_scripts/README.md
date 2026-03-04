@@ -71,3 +71,30 @@ Repeat:
 | `model.py` | Generative model: sampling $U$ and computing $X$ |
 | `flow_matching.py` | MLP velocity network and flow-matching utilities |
 | `train.py` | End-to-end training script (Phase I + Phase II) |
+| `run_modal.py` | Run training on Modal with a T4 GPU and save diagnostic plots |
+| `results/` | Output PNGs from a completed run |
+
+## Running on Modal
+
+```bash
+modal run gaubump_scripts/run_modal.py
+```
+
+This runs the full training pipeline on a T4 GPU and saves three
+diagnostic PNGs to `gaubump_scripts/results/`.
+
+## Results (easy case)
+
+Configuration: $L=3$, $T=20$, `null_prob_true=0.8`, 2000 Phase I steps,
+200 Phase II iterations, batch size 256, seed 42.
+
+| Plot | Description |
+|------|-------------|
+| `results/posterior_vs_truth.png` | Scatter: ground-truth $\pi$ samples vs aggregate posterior |
+| `results/rho_marginal.png` | Histogram: marginal of $\rho$ (true vs inferred) |
+| `results/true_vs_inferred_U.png` | Scatter: true latent $U$ vs inferred $U$ |
+
+The inferred aggregate posterior shows `frac(|ρ|<0.1) ≈ 24%` compared to
+the true null probability of 80%.  The model is beginning to learn the
+structure but has not yet tightly recovered the atom — expected for a
+first baby-step run.
