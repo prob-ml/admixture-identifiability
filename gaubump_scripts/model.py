@@ -86,8 +86,7 @@ def sample_pi(key: jax.Array, pi, n: int) -> jnp.ndarray:
 
 
 def _sample_empirical(key: jax.Array, pi: EmpiricalDistribution, n: int) -> jnp.ndarray:
-    k1, _ = jax.random.split(key)
-    idxs = jax.random.randint(k1, shape=(n,), minval=0, maxval=pi.samples.shape[0])
+    idxs = jax.random.randint(key, shape=(n,), minval=0, maxval=pi.samples.shape[0])
     return pi.samples[idxs]
 
 
@@ -153,37 +152,9 @@ def compute_X(U: jnp.ndarray, L: int) -> jnp.ndarray:
     shapes = rho[:, None] * jnp.exp(-xs[None, :] ** 2 / (2.0 * var[:, None]))
     # shapes: (T+1, 2L+1)
 
-    # X_t = sum_{tau} shapes[tau, t - tau]   for t in {L, ..., T-L}
-    # Equivalently, for each tau the shape contributes to
-    # t = tau + dx  where dx in {-L,...,L}, i.e. t in {tau-L,...,tau+L}.
-    # We accumulate into X indexed from L to T-L.
-
-    def _body(carry, tau):
-        X = carry
-        # shape contribution of source tau
-        s = shapes[tau]  # (2L+1,)
-        # This contributes to observation indices tau + dx - L for dx in {-L..L}
-        # In 0-based observation indexing: obs_idx = tau - L + dx - (-L) = tau + dx
-        # Wait, let me re-derive.
-        # X_t for t in {L,...,T-L}.  obs array index i = t - L, so i in {0,...,T-2L}.
-        # X_{t} += shapes[tau, t - tau].
-        # For fixed tau, t - tau = dx ranges over {-L,...,L},
-        # so t = tau + dx, and i = tau + dx - L.
-        # i ranges from tau - 2L to tau.
-        # We need 0 <= i < n_obs, i.e. 0 <= tau+dx-L < n_obs.
-        start = tau - L  # i when dx = -L  -> t=tau-L, i=tau-2L... wait.
-        # Let's be careful: t = tau + dx, i = t - L = tau + dx - L.
-        # For dx = -L: i = tau - 2L
-        # For dx = +L: i = tau
-        # We need to clip to [0, n_obs).
-        indices = tau + jnp.arange(-L, L + 1) - L  # (2L+1,)
-        valid = (indices >= 0) & (indices < n_obs)
-        X = X + jnp.where(valid, s, 0.0).at[jnp.clip(indices, 0, n_obs - 1)].get()
-        # Actually, we need scatter-add. Let me use a different approach.
-        return X, None
-
-    # Simpler approach: direct double-loop via vmap or explicit indexing.
-    # For clarity and JIT-friendliness, use a padded scatter.
+    # X_t = sum_{tau} shapes[tau, t - tau] for t in {L,...,T-L}.
+    # Observation index i = t - L, so i in {0,...,T-2L}.
+    # For fixed tau, dx in {-L,...,L}: t = tau+dx, i = tau+dx-L.
 
     X = jnp.zeros(n_obs)
     for tau in range(T_plus_1):
