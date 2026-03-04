@@ -141,8 +141,32 @@ def train(
                 f"mean|rho|={mean_rho:.3f}  frac(|rho|<0.1)={frac_small_rho:.3f}"
             )
 
+    # ------------------------------------------------------------------
+    # Final diagnostic inference
+    # ------------------------------------------------------------------
+    print("\n=== Final diagnostic inference ===")
+    key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
+    n_diag = max(n_source, 256)
+    X_diag, U_diag_true = sample_XU(k_diag_true, pi_true, L, T, n_diag)
+    U_diag_inferred = jax.lax.stop_gradient(
+        sample_flow_batch(model, X_diag, k_diag_infer)
+    )
+    U_diag_flat = U_diag_inferred.reshape(-1, 2)
+    frac_near_zero = float(jnp.mean(jnp.abs(U_diag_flat[:, 0]) < 0.1))
+    print(f"  n_diag={n_diag}, total U pairs={U_diag_flat.shape[0]}")
+    print(f"  frac(|rho|<0.1)={frac_near_zero:.3f}  (true null_prob={null_prob_true})")
+
     print("\nDone.")
-    return model
+    return {
+        "model": model,
+        "pi_true": pi_true,
+        "U_diag_inferred": U_diag_inferred,  # (n_diag, T+1, 2)
+        "U_diag_true": U_diag_true,          # (n_diag, T+1, 2)
+        "X_diag": X_diag,                    # (n_diag, T-2L+1)
+        "null_prob_true": null_prob_true,
+        "L": L,
+        "T": T,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +188,7 @@ def main():
     parser.add_argument("--null_prob_init", type=float, default=0.5)
     args = parser.parse_args()
 
-    train(
+    result = train(
         L=args.L,
         T=args.T,
         n_phase1_steps=args.n_phase1,
@@ -177,6 +201,7 @@ def main():
         null_prob_true=args.null_prob_true,
         null_prob_init=args.null_prob_init,
     )
+    return result
 
 
 if __name__ == "__main__":

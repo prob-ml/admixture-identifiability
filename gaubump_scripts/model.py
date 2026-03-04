@@ -231,15 +231,10 @@ def sample_XU(key: jax.Array, pi, L: int, T: int, n_samples: int):
         X: array of shape (n_samples, T-2L+1).
         U: array of shape (n_samples, T+1, 2).
     """
-    keys = jax.random.split(key, n_samples + 1)
-    sample_keys = keys[1:]
-
-    # Draw marks for each sample: each sample needs (T+1) marks
-    all_U = []
-    for i in range(n_samples):
-        marks = sample_pi(sample_keys[i], pi, T + 1)  # (T+1, 2)
-        all_U.append(marks)
-    U = jnp.stack(all_U)  # (n_samples, T+1, 2)
+    # Draw all marks in one vectorised call, then reshape
+    total_marks = n_samples * (T + 1)
+    marks = sample_pi(key, pi, total_marks)       # (total_marks, 2)
+    U = marks.reshape(n_samples, T + 1, 2)
 
     X = compute_X_batched(U, L)  # (n_samples, T-2L+1)
     return X, U
