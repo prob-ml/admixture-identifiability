@@ -378,7 +378,7 @@ def run_training():
         jax.block_until_ready((X_new, U_new))
         t3 = time_mod.time()
 
-        # (d) Gradient step — fully JIT'd, no sync until float() below.
+        # (d) Gradient step — fully JIT'd, sync via block_until_ready.
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U_new, X_new, k_step)
         jax.block_until_ready(loss)
