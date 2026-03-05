@@ -174,6 +174,10 @@ def make_optimizer(lr: float = 1e-3):
     return optax.adam(lr)
 
 
+# The train step is fully JIT-compiled: loss computation, gradient,
+# and parameter update all run as a single fused GPU kernel.  The
+# returned ``loss`` is a device array — no host sync happens until
+# the caller explicitly reads it (e.g. via ``float(loss)``).
 @eqx.filter_jit
 def update_step(model: VelocityMLP, opt_state, optimizer, U: jnp.ndarray,
                 X: jnp.ndarray, key: jax.Array):

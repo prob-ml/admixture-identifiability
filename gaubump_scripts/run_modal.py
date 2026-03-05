@@ -3,7 +3,7 @@
 
 Produces diagnostic scatter plots comparing the inferred aggregate
 posterior on U with the ground-truth shape distribution pi, and saves
-PNGs to gaubump_scripts/results/.
+PNGs and training logs to gaubump_scripts/results/.
 
 Usage:
     modal run gaubump_scripts/run_modal.py
@@ -35,6 +35,10 @@ image = (
 def run_training():
     """Run training and generate diagnostic plots on a GPU."""
     import io
+    import subprocess
+    import threading
+    import time as time_mod
+
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -42,7 +46,55 @@ def run_training():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    print(f"JAX devices: {jax.devices()}")
+    # ----------------------------------------------------------------
+    # Logging helpers
+    # ----------------------------------------------------------------
+    log_lines: list[str] = []
+    _t0 = time_mod.time()
+
+    def log(msg: str):
+        """Print to stdout and capture for the training log."""
+        elapsed = time_mod.time() - _t0
+        line = f"[{elapsed:7.1f}s] {msg}"
+        print(line, flush=True)
+        log_lines.append(line)
+
+    # ----------------------------------------------------------------
+    # GPU utilization monitor (background thread)
+    # ----------------------------------------------------------------
+    gpu_log_lines: list[str] = []
+    _gpu_active = True
+
+    def _poll_gpu():
+        while _gpu_active:
+            try:
+                r = subprocess.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=timestamp,utilization.gpu,utilization.memory,"
+                        "memory.used,memory.total,temperature.gpu",
+                        "--format=csv,noheader",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if r.returncode == 0:
+                    line = r.stdout.strip()
+                    gpu_log_lines.append(line)
+                    log(f"[GPU] {line}")
+            except Exception:
+                pass
+            time_mod.sleep(15)
+
+    gpu_thread = threading.Thread(target=_poll_gpu, daemon=True)
+    gpu_thread.start()
+
+    # ----------------------------------------------------------------
+    # Device info
+    # ----------------------------------------------------------------
+    log(f"JAX devices: {jax.devices()}")
+    log(f"JAX default backend: {jax.default_backend()}")
 
     # ---- model types ----
     from typing import NamedTuple
@@ -175,7 +227,9 @@ def run_training():
             s = s + dt
         return z
 
+    @eqx.filter_jit
     def sample_flow_batch(model, X_batch, key, n_steps=20):
+        """Sample U for a batch of observations (JIT-compiled)."""
         batch = X_batch.shape[0]
         keys = jax.random.split(key, batch)
         T_plus_1 = model.u_dim // 2
@@ -184,6 +238,10 @@ def run_training():
         )(X_batch, keys)
         return U_flat.reshape(batch, T_plus_1, 2)
 
+    # The train step is fully JIT-compiled: loss computation, gradient,
+    # and parameter update all run as a single fused GPU kernel.  The
+    # returned ``loss`` is a device array — no host sync happens until
+    # the caller explicitly reads it (e.g. via ``float(loss)``).
     @eqx.filter_jit
     def update_step(model, opt_state, optimizer, U, X, key):
         batch = X.shape[0]
@@ -243,18 +301,36 @@ def run_training():
     optimizer = optax.adam(lr)
     opt_state = optimizer.init(model)
 
-    # Phase I
-    print(f"=== Phase I ({n_phase1_steps} steps) ===", flush=True)
+    # ================================================================
+    # Phase I — warm-up
+    # ================================================================
+    log(f"=== Phase I ({n_phase1_steps} steps) ===")
+    log_interval_p1 = max(1, n_phase1_steps // 20)
+    t_phase1 = time_mod.time()
+
     for step in range(n_phase1_steps):
         key, k_data, k_step = jax.random.split(key, 3)
         X, U = sample_XU(k_data, pihat, L, T, n_init_samples)
+        # update_step is fully JIT'd — returns device arrays, no sync.
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U, X, k_step)
-        if step % max(1, n_phase1_steps // 20) == 0 or step == n_phase1_steps - 1:
-            print(f"  step {step:5d}  loss={float(loss):.6f}", flush=True)
+        # Sync with GPU only at epoch boundaries to read the loss.
+        if step % log_interval_p1 == 0 or step == n_phase1_steps - 1:
+            log(f"  step {step:5d}  loss={float(loss):.6f}")
 
-    # Phase II
-    print(f"\n=== Phase II ({n_phase2_steps} iterations) ===", flush=True)
+    # Block until Phase I is fully complete for accurate timing.
+    jax.block_until_ready(loss)
+    dt_p1 = time_mod.time() - t_phase1
+    log(f"Phase I complete in {dt_p1:.1f}s "
+        f"({dt_p1 / n_phase1_steps * 1000:.1f} ms/step)")
+
+    # ================================================================
+    # Phase II — iterative refinement
+    # ================================================================
+    log(f"=== Phase II ({n_phase2_steps} iterations) ===")
+    log_interval_p2 = max(1, n_phase2_steps // 20)
+    t_phase2 = time_mod.time()
+
     for step in range(n_phase2_steps):
         key, k_true, k_infer, k_data, k_step = jax.random.split(key, 5)
         X_true, _ = sample_XU(k_true, pi_true, L, T, n_source)
@@ -265,22 +341,28 @@ def run_training():
         pihat_emp = EmpiricalDistribution(samples=U_flat)
         X_new, U_new = sample_XU(
             k_data, pihat_emp, L, T, n_eachstep_samples)
+        # update_step is fully JIT'd — no sync until float() below.
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U_new, X_new, k_step)
-        if step % max(1, n_phase2_steps // 20) == 0 or step == n_phase2_steps - 1:
+        # Sync only at epoch boundaries.
+        if step % log_interval_p2 == 0 or step == n_phase2_steps - 1:
             mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
             frac_small = float(jnp.mean(jnp.abs(U_flat[:, 0]) < 0.1))
-            print(
+            log(
                 f"  iter {step:5d}  loss={float(loss):.6f}  "
                 f"mean|rho|={mean_rho:.3f}  "
-                f"frac(|rho|<0.1)={frac_small:.3f}",
-                flush=True,
+                f"frac(|rho|<0.1)={frac_small:.3f}"
             )
+
+    jax.block_until_ready(loss)
+    dt_p2 = time_mod.time() - t_phase2
+    log(f"Phase II complete in {dt_p2:.1f}s "
+        f"({dt_p2 / n_phase2_steps * 1000:.1f} ms/step)")
 
     # ================================================================
     # Final diagnostic inference
     # ================================================================
-    print("\n=== Final diagnostic inference ===", flush=True)
+    log("=== Final diagnostic inference ===")
     key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
     n_diag = 512
     X_diag, U_diag_true = sample_XU(k_diag_true, pi_true, L, T, n_diag)
@@ -291,9 +373,16 @@ def run_training():
     U_true_flat = U_diag_true.reshape(-1, 2)
 
     frac_near_zero = float(jnp.mean(jnp.abs(U_diag_flat[:, 0]) < 0.1))
-    print(f"  n_diag={n_diag}, total U pairs={U_diag_flat.shape[0]}")
-    print(f"  frac(|rho|<0.1) inferred = {frac_near_zero:.3f}")
-    print(f"  true null_prob            = {null_prob_true}")
+    log(f"  n_diag={n_diag}, total U pairs={U_diag_flat.shape[0]}")
+    log(f"  frac(|rho|<0.1) inferred = {frac_near_zero:.3f}")
+    log(f"  true null_prob            = {null_prob_true}")
+    log(f"  total wall time           = {time_mod.time() - _t0:.1f}s")
+
+    # ================================================================
+    # Stop GPU monitor
+    # ================================================================
+    _gpu_active = False
+    gpu_thread.join(timeout=5)
 
     # ================================================================
     # Generate plots
@@ -304,7 +393,7 @@ def run_training():
     key, k_ref = jax.random.split(key)
     ref_samples = np.array(sample_pi(k_ref, pi_true, 10000))
 
-    plots = {}
+    results: dict[str, bytes] = {}
 
     # ---- Plot 1: Scatter of aggregate posterior vs ground truth ----
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -344,7 +433,7 @@ def run_training():
     buf1 = io.BytesIO()
     fig.savefig(buf1, format="png", dpi=150)
     plt.close(fig)
-    plots["posterior_vs_truth.png"] = buf1.getvalue()
+    results["posterior_vs_truth.png"] = buf1.getvalue()
 
     # ---- Plot 2: Marginal histogram of rho ----
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -372,7 +461,7 @@ def run_training():
     buf2 = io.BytesIO()
     fig.savefig(buf2, format="png", dpi=150)
     plt.close(fig)
-    plots["rho_marginal.png"] = buf2.getvalue()
+    results["rho_marginal.png"] = buf2.getvalue()
 
     # ---- Plot 3: True vs inferred latent U (side by side) ----
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -404,10 +493,20 @@ def run_training():
     buf3 = io.BytesIO()
     fig.savefig(buf3, format="png", dpi=150)
     plt.close(fig)
-    plots["true_vs_inferred_U.png"] = buf3.getvalue()
+    results["true_vs_inferred_U.png"] = buf3.getvalue()
 
-    print(f"\nGenerated {len(plots)} plots.")
-    return plots
+    # ---- Training log ----
+    training_log = "\n".join(log_lines) + "\n"
+    results["training_log.txt"] = training_log.encode("utf-8")
+
+    # ---- GPU utilization log ----
+    gpu_header = ("timestamp, utilization.gpu [%], utilization.memory [%], "
+                  "memory.used [MiB], memory.total [MiB], temperature.gpu")
+    gpu_utilization_log = gpu_header + "\n" + "\n".join(gpu_log_lines) + "\n"
+    results["gpu_utilization.txt"] = gpu_utilization_log.encode("utf-8")
+
+    log(f"Generated {len(results)} result files.")
+    return results
 
 
 @app.local_entrypoint()
@@ -416,9 +515,9 @@ def main():
     results_dir = os.path.join(os.path.dirname(__file__), "results")
     os.makedirs(results_dir, exist_ok=True)
 
-    plots = run_training.remote()
+    result_files = run_training.remote()
 
-    for name, data in plots.items():
+    for name, data in result_files.items():
         path = os.path.join(results_dir, name)
         with open(path, "wb") as f:
             f.write(data)
