@@ -38,6 +38,7 @@ def run_training():
     import subprocess
     import threading
     import time as time_mod
+    from functools import partial
 
     import jax
     import jax.numpy as jnp
@@ -112,32 +113,49 @@ def run_training():
     class EmpiricalDistribution(NamedTuple):
         samples: jnp.ndarray
 
-    # ---- sampling ----
+    # ---- sampling (JIT-compiled) ----
 
-    def sample_pi(key, pi, n):
-        if isinstance(pi, EmpiricalDistribution):
-            idxs = jax.random.randint(key, shape=(n,), minval=0,
-                                      maxval=pi.samples.shape[0])
-            return pi.samples[idxs]
-        return _sample_mixture(key, pi, n)
-
-    def _sample_mixture(key, pi, n):
-        k_null, k_comp, k_which, k_gauss = jax.random.split(key, 4)
-        is_null = jax.random.bernoulli(k_null, p=pi.null_prob, shape=(n,))
-        n_comp = len(pi.components)
-        weights = jnp.array([c.weight for c in pi.components])
-        weights = weights / weights.sum()
-        comp_idx = jax.random.choice(k_which, n_comp, shape=(n,), p=weights)
-        means = jnp.stack([c.mean for c in pi.components])
-        stds = jnp.stack([c.std for c in pi.components])
+    def _sample_XU_mixture_impl(key, null_prob, weights, means, stds, L, T, n_samples):
+        """Pure-JAX mixture sampling; will be wrapped with jax.jit."""
+        total = n_samples * (T + 1)
+        k_null, k_which, k_gauss = jax.random.split(key, 3)
+        is_null = jax.random.bernoulli(k_null, p=null_prob, shape=(total,))
+        comp_idx = jax.random.choice(
+            k_which, weights.shape[0], shape=(total,), p=weights)
         chosen_mean = means[comp_idx]
         chosen_std = stds[comp_idx]
-        z = jax.random.normal(k_gauss, shape=(n, 2))
-        non_null_samples = chosen_mean + chosen_std * z
-        null_logsigma = jax.random.normal(k_null, shape=(n,))
-        null_samples = jnp.stack([jnp.zeros(n), null_logsigma], axis=-1)
-        marks = jnp.where(is_null[:, None], null_samples, non_null_samples)
-        return marks
+        z = jax.random.normal(k_gauss, shape=(total, 2))
+        non_null = chosen_mean + chosen_std * z
+        null_ls = jax.random.normal(k_null, shape=(total,))
+        null = jnp.stack([jnp.zeros(total), null_ls], axis=-1)
+        marks = jnp.where(is_null[:, None], null, non_null)
+        U = marks.reshape(n_samples, T + 1, 2)
+        X = compute_X_batched(U, L)
+        return X, U
+
+    sample_XU_mixture = jax.jit(
+        _sample_XU_mixture_impl, static_argnums=(5, 6, 7))
+
+    def _sample_XU_empirical_impl(key, samples, L, T, n_samples):
+        """Pure-JAX empirical sampling; will be wrapped with jax.jit."""
+        total = n_samples * (T + 1)
+        idxs = jax.random.randint(
+            key, shape=(total,), minval=0, maxval=samples.shape[0])
+        marks = samples[idxs]
+        U = marks.reshape(n_samples, T + 1, 2)
+        X = compute_X_batched(U, L)
+        return X, U
+
+    sample_XU_empirical = jax.jit(
+        _sample_XU_empirical_impl, static_argnums=(2, 3, 4))
+
+    def stack_mixture_params(pi):
+        """Pre-stack mixture params into JAX arrays."""
+        weights = jnp.array([c.weight for c in pi.components])
+        weights = weights / weights.sum()
+        means = jnp.stack([c.mean for c in pi.components])
+        stds = jnp.stack([c.std for c in pi.components])
+        return pi.null_prob, weights, means, stds
 
     # ---- observation computation ----
 
@@ -161,14 +179,6 @@ def run_training():
         shapes_flat = shapes.reshape(U.shape[0], -1)
         X = shapes_flat @ M_flat
         return X
-
-    def sample_XU(key, pi, L, T, n_samples):
-        """Vectorised: draw all marks in one call, then reshape."""
-        total_marks = n_samples * (T + 1)
-        marks = sample_pi(key, pi, total_marks)          # (total, 2)
-        U = marks.reshape(n_samples, T + 1, 2)
-        X = compute_X_batched(U, L)
-        return X, U
 
     # ---- flow matching network ----
     import equinox as eqx
@@ -221,11 +231,13 @@ def run_training():
     def sample_flow(model, X, key, n_steps=20):
         z = jax.random.normal(key, shape=(model.u_dim,))
         dt = 1.0 / n_steps
-        s = 0.0
-        for _ in range(n_steps):
+
+        def euler_step(i, z):
+            s = i * dt
             v = model(z, X, jnp.array(s))
-            z = z + dt * v
-            s = s + dt
+            return z + dt * v
+
+        z = jax.lax.fori_loop(0, n_steps, euler_step, z)
         return z
 
     @eqx.filter_jit
@@ -302,46 +314,50 @@ def run_training():
     optimizer = optax.adam(lr)
     opt_state = optimizer.init(model)
 
+    # Pre-stack mixture parameters for JIT-compiled sampling
+    np_hat, w_hat, m_hat, s_hat = stack_mixture_params(pihat)
+    np_true, w_true, m_true, s_true = stack_mixture_params(pi_true)
+
+    # ================================================================
+    # JIT warmup — compile all kernels before the timing loops
+    # ================================================================
+    log("=== JIT warmup ===")
+    t_warmup = time_mod.time()
+
+    key, k1, k2, k3, k4, k5 = jax.random.split(key, 6)
+    _X1, _U1 = sample_XU_mixture(
+        k1, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
+    _X2, _ = sample_XU_mixture(
+        k2, np_true, w_true, m_true, s_true, L, T, n_source)
+    _, _, _loss = update_step(model, opt_state, optimizer, _U1, _X1, k3)
+    _Uinf = sample_flow_batch(model, _X2, k4)
+    _X3, _ = sample_XU_empirical(
+        k5, _Uinf.reshape(-1, 2), L, T, n_eachstep_samples)
+    jax.block_until_ready((_X1, _X2, _X3, _loss, _Uinf))
+
+    dt_warmup = time_mod.time() - t_warmup
+    log(f"JIT warmup complete in {dt_warmup:.1f}s")
+
     # ================================================================
     # Phase I — warm-up
     # ================================================================
     log(f"=== Phase I ({n_phase1_steps} steps) ===")
     log_interval_p1 = max(1, n_phase1_steps // 20)
     t_phase1 = time_mod.time()
-    p1_datagen_s = 0.0
-    p1_grad_s = 0.0
 
     for step in range(n_phase1_steps):
         key, k_data, k_step = jax.random.split(key, 3)
-
-        t0 = time_mod.time()
-        X, U = sample_XU(k_data, pihat, L, T, n_init_samples)
-        # Force data onto device before timing the grad step.
-        jax.block_until_ready((X, U))
-        t1 = time_mod.time()
-
-        # update_step is fully JIT'd — returns device arrays, no sync.
+        X, U = sample_XU_mixture(
+            k_data, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U, X, k_step)
-        jax.block_until_ready(loss)
-        t2 = time_mod.time()
-
-        p1_datagen_s += t1 - t0
-        p1_grad_s += t2 - t1
-
-        # Sync with GPU only at epoch boundaries to read the loss.
         if step % log_interval_p1 == 0 or step == n_phase1_steps - 1:
             log(f"  step {step:5d}  loss={float(loss):.6f}")
 
-    # Block until Phase I is fully complete for accurate timing.
     jax.block_until_ready(loss)
     dt_p1 = time_mod.time() - t_phase1
     log(f"Phase I complete in {dt_p1:.1f}s "
         f"({dt_p1 / n_phase1_steps * 1000:.1f} ms/step)")
-    log(f"  breakdown: data_gen={p1_datagen_s:.1f}s "
-        f"({p1_datagen_s / n_phase1_steps * 1000:.1f} ms/step)  "
-        f"grad_step={p1_grad_s:.1f}s "
-        f"({p1_grad_s / n_phase1_steps * 1000:.1f} ms/step)")
 
     # ================================================================
     # Phase II — iterative refinement
@@ -349,47 +365,28 @@ def run_training():
     log(f"=== Phase II ({n_phase2_steps} iterations) ===")
     log_interval_p2 = max(1, n_phase2_steps // 20)
     t_phase2 = time_mod.time()
-    p2_true_datagen_s = 0.0
-    p2_inference_s = 0.0
-    p2_emp_datagen_s = 0.0
-    p2_grad_s = 0.0
 
     for step in range(n_phase2_steps):
         key, k_true, k_infer, k_data, k_step = jax.random.split(key, 5)
 
-        # (a) Generate data from the true distribution
-        t0 = time_mod.time()
-        X_true, _ = sample_XU(k_true, pi_true, L, T, n_source)
-        jax.block_until_ready(X_true)
-        t1 = time_mod.time()
+        # (a) Generate data from the true distribution (JIT-compiled)
+        X_true, _ = sample_XU_mixture(
+            k_true, np_true, w_true, m_true, s_true, L, T, n_source)
 
         # (b) Infer U with the current flow model
         U_inferred = jax.lax.stop_gradient(
             sample_flow_batch(model, X_true, k_infer)
         )
-        jax.block_until_ready(U_inferred)
-        t2 = time_mod.time()
 
-        # (c) Build empirical pihat and sample new training data
+        # (c) Sample new training data from empirical pihat (JIT-compiled)
         U_flat = U_inferred.reshape(-1, 2)
-        pihat_emp = EmpiricalDistribution(samples=U_flat)
-        X_new, U_new = sample_XU(
-            k_data, pihat_emp, L, T, n_eachstep_samples)
-        jax.block_until_ready((X_new, U_new))
-        t3 = time_mod.time()
+        X_new, U_new = sample_XU_empirical(
+            k_data, U_flat, L, T, n_eachstep_samples)
 
-        # (d) Gradient step — fully JIT'd, sync via block_until_ready.
+        # (d) Gradient step
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U_new, X_new, k_step)
-        jax.block_until_ready(loss)
-        t4 = time_mod.time()
 
-        p2_true_datagen_s += t1 - t0
-        p2_inference_s += t2 - t1
-        p2_emp_datagen_s += t3 - t2
-        p2_grad_s += t4 - t3
-
-        # Sync only at epoch boundaries.
         if step % log_interval_p2 == 0 or step == n_phase2_steps - 1:
             mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
             frac_small = float(jnp.mean(jnp.abs(U_flat[:, 0]) < 0.1))
@@ -403,15 +400,6 @@ def run_training():
     dt_p2 = time_mod.time() - t_phase2
     log(f"Phase II complete in {dt_p2:.1f}s "
         f"({dt_p2 / n_phase2_steps * 1000:.1f} ms/step)")
-    log(f"  breakdown per step:")
-    log(f"    true_datagen  = {p2_true_datagen_s:.1f}s "
-        f"({p2_true_datagen_s / n_phase2_steps * 1000:.1f} ms/step)")
-    log(f"    flow_infer    = {p2_inference_s:.1f}s "
-        f"({p2_inference_s / n_phase2_steps * 1000:.1f} ms/step)")
-    log(f"    emp_datagen   = {p2_emp_datagen_s:.1f}s "
-        f"({p2_emp_datagen_s / n_phase2_steps * 1000:.1f} ms/step)")
-    log(f"    grad_step     = {p2_grad_s:.1f}s "
-        f"({p2_grad_s / n_phase2_steps * 1000:.1f} ms/step)")
 
     # ================================================================
     # Final diagnostic inference
@@ -419,7 +407,8 @@ def run_training():
     log("=== Final diagnostic inference ===")
     key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
     n_diag = 512
-    X_diag, U_diag_true = sample_XU(k_diag_true, pi_true, L, T, n_diag)
+    X_diag, U_diag_true = sample_XU_mixture(
+        k_diag_true, np_true, w_true, m_true, s_true, L, T, n_diag)
     U_diag_inferred = jax.lax.stop_gradient(
         sample_flow_batch(model, X_diag, k_diag_infer)
     )
@@ -445,7 +434,11 @@ def run_training():
     U_true_np = np.array(U_true_flat)
 
     key, k_ref = jax.random.split(key)
-    ref_samples = np.array(sample_pi(k_ref, pi_true, 10000))
+    # Use the JIT-compiled mixture sampler to generate reference marks.
+    # T=0 gives 1 mark per "sample", so n_samples == n_marks.
+    _, ref_U = sample_XU_mixture(
+        k_ref, np_true, w_true, m_true, s_true, L=0, T=0, n_samples=10000)
+    ref_samples = np.array(ref_U.reshape(-1, 2))
 
     results: dict[str, bytes] = {}
 

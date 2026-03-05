@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from functools import partial
 from typing import NamedTuple
 
 
@@ -237,4 +238,67 @@ def sample_XU(key: jax.Array, pi, L: int, T: int, n_samples: int):
     U = marks.reshape(n_samples, T + 1, 2)
 
     X = compute_X_batched(U, L)  # (n_samples, T-2L+1)
+    return X, U
+
+
+# ---------------------------------------------------------------------------
+# JIT-compiled data generation
+# ---------------------------------------------------------------------------
+
+def stack_mixture_params(pi: ShapeDistribution):
+    """Pre-stack mixture parameters into JAX arrays for JIT-compiled sampling.
+
+    Returns:
+        (null_prob, weights, means, stds) where weights, means, stds are
+        JAX arrays of shapes (n_comp,), (n_comp, 2), (n_comp, 2).
+    """
+    weights = jnp.array([c.weight for c in pi.components])
+    weights = weights / weights.sum()
+    means = jnp.stack([c.mean for c in pi.components])
+    stds = jnp.stack([c.std for c in pi.components])
+    return pi.null_prob, weights, means, stds
+
+
+@partial(jax.jit, static_argnums=(5, 6, 7))
+def sample_XU_mixture(key, null_prob, weights, means, stds, L, T, n_samples):
+    """JIT-compiled (X, U) sampling from a Gaussian mixture shape distribution.
+
+    Use :func:`stack_mixture_params` to pre-compute the array arguments
+    from a :class:`ShapeDistribution`.  *L*, *T*, and *n_samples* are
+    static (they determine array shapes).
+    """
+    total = n_samples * (T + 1)
+    k_null, k_which, k_gauss = jax.random.split(key, 3)
+
+    is_null = jax.random.bernoulli(k_null, p=null_prob, shape=(total,))
+    comp_idx = jax.random.choice(
+        k_which, weights.shape[0], shape=(total,), p=weights)
+
+    chosen_mean = means[comp_idx]
+    chosen_std = stds[comp_idx]
+    z = jax.random.normal(k_gauss, shape=(total, 2))
+    non_null = chosen_mean + chosen_std * z
+
+    null_ls = jax.random.normal(k_null, shape=(total,))
+    null = jnp.stack([jnp.zeros(total), null_ls], axis=-1)
+
+    marks = jnp.where(is_null[:, None], null, non_null)
+    U = marks.reshape(n_samples, T + 1, 2)
+    X = compute_X_batched(U, L)
+    return X, U
+
+
+@partial(jax.jit, static_argnums=(2, 3, 4))
+def sample_XU_empirical(key, samples, L, T, n_samples):
+    """JIT-compiled (X, U) sampling from an empirical distribution.
+
+    *samples* is an array of shape ``(N, 2)`` from which marks are drawn
+    with replacement.  *L*, *T*, and *n_samples* are static.
+    """
+    total = n_samples * (T + 1)
+    idxs = jax.random.randint(
+        key, shape=(total,), minval=0, maxval=samples.shape[0])
+    marks = samples[idxs]
+    U = marks.reshape(n_samples, T + 1, 2)
+    X = compute_X_batched(U, L)
     return X, U

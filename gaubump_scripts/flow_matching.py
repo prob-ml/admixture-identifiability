@@ -122,6 +122,9 @@ def sample_flow(model: VelocityMLP, X: jnp.ndarray, key: jax.Array,
                 n_steps: int = 20) -> jnp.ndarray:
     """Sample U by integrating the learned ODE from noise.
 
+    Uses ``jax.lax.fori_loop`` so the loop body is compiled once
+    rather than being unrolled *n_steps* times.
+
     Args:
         model:   trained velocity network.
         X:       (x_dim,) observation vector.
@@ -133,11 +136,13 @@ def sample_flow(model: VelocityMLP, X: jnp.ndarray, key: jax.Array,
     """
     z = jax.random.normal(key, shape=(model.u_dim,))
     dt = 1.0 / n_steps
-    s = 0.0
-    for _ in range(n_steps):
+
+    def euler_step(i, z):
+        s = i * dt
         v = model(z, X, jnp.array(s))
-        z = z + dt * v
-        s = s + dt
+        return z + dt * v
+
+    z = jax.lax.fori_loop(0, n_steps, euler_step, z)
     return z
 
 

@@ -20,6 +20,9 @@ from model import (
     EmpiricalDistribution,
     sample_XU,
     sample_pi,
+    stack_mixture_params,
+    sample_XU_mixture,
+    sample_XU_empirical,
 )
 from flow_matching import (
     VelocityMLP,
@@ -92,6 +95,10 @@ def train(
     pi_true = make_default_pi_true(null_prob=null_prob_true)
     pihat = make_default_pihat_init(null_prob=null_prob_init)
 
+    # Pre-stack mixture params for JIT-compiled sampling
+    np_hat, w_hat, m_hat, s_hat = stack_mixture_params(pihat)
+    np_true, w_true, m_true, s_true = stack_mixture_params(pi_true)
+
     # Initialise network and optimiser
     key, model_key = jax.random.split(key)
     model = VelocityMLP(T=T, L=L, hidden_dims=hidden_dims, key=model_key)
@@ -99,12 +106,26 @@ def train(
     opt_state = optimizer.init(model)
 
     # ------------------------------------------------------------------
+    # JIT warmup — compile all kernels before the training loops
+    # ------------------------------------------------------------------
+    print("=== JIT warmup ===")
+    key, k1, k2, k3, k4, k5 = jax.random.split(key, 6)
+    _X1, _U1 = sample_XU_mixture(k1, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
+    _X2, _ = sample_XU_mixture(k2, np_true, w_true, m_true, s_true, L, T, n_source)
+    _, _, _loss = update_step(model, opt_state, optimizer, _U1, _X1, k3)
+    _Uinf = sample_flow_batch(model, _X2, k4)
+    _X3, _ = sample_XU_empirical(k5, _Uinf.reshape(-1, 2), L, T, n_eachstep_samples)
+    jax.block_until_ready((_X1, _X2, _X3, _loss, _Uinf))
+    print("  warmup complete")
+
+    # ------------------------------------------------------------------
     # Phase I — warm-up
     # ------------------------------------------------------------------
     print(f"=== Phase I ({n_phase1_steps} steps) ===")
     for step in range(n_phase1_steps):
         key, k_data, k_step = jax.random.split(key, 3)
-        X, U = sample_XU(k_data, pihat, L, T, n_init_samples)
+        X, U = sample_XU_mixture(k_data, np_hat, w_hat, m_hat, s_hat,
+                                 L, T, n_init_samples)
         model, opt_state, loss = update_step(model, opt_state, optimizer, U, X, k_step)
         if step % max(1, n_phase1_steps // 20) == 0 or step == n_phase1_steps - 1:
             print(f"  step {step:5d}  loss={float(loss):.6f}")
@@ -116,20 +137,18 @@ def train(
     for step in range(n_phase2_steps):
         key, k_true, k_infer, k_data, k_step = jax.random.split(key, 5)
 
-        # 1. Draw X from the *true* model
-        X_true, _ = sample_XU(k_true, pi_true, L, T, n_source)
+        # 1. Draw X from the *true* model (JIT-compiled)
+        X_true, _ = sample_XU_mixture(k_true, np_true, w_true, m_true, s_true,
+                                      L, T, n_source)
 
         # 2. Infer U with the current flow model (stop-gradient)
         U_inferred = jax.lax.stop_gradient(
             sample_flow_batch(model, X_true, k_infer)
         )  # (n_source, T+1, 2)
 
-        # 3. Build empirical pihat
+        # 3. Train one step on fresh samples from empirical pihat (JIT-compiled)
         U_flat = U_inferred.reshape(-1, 2)  # (n_source*(T+1), 2)
-        pihat_emp = EmpiricalDistribution(samples=U_flat)
-
-        # 4. Train one step on fresh samples from empirical pihat
-        X_new, U_new = sample_XU(k_data, pihat_emp, L, T, n_eachstep_samples)
+        X_new, U_new = sample_XU_empirical(k_data, U_flat, L, T, n_eachstep_samples)
         model, opt_state, loss = update_step(model, opt_state, optimizer, U_new, X_new, k_step)
 
         if step % max(1, n_phase2_steps // 20) == 0 or step == n_phase2_steps - 1:
@@ -147,7 +166,8 @@ def train(
     print("\n=== Final diagnostic inference ===")
     key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
     n_diag = max(n_source, 256)
-    X_diag, U_diag_true = sample_XU(k_diag_true, pi_true, L, T, n_diag)
+    X_diag, U_diag_true = sample_XU_mixture(
+        k_diag_true, np_true, w_true, m_true, s_true, L, T, n_diag)
     U_diag_inferred = jax.lax.stop_gradient(
         sample_flow_batch(model, X_diag, k_diag_infer)
     )
