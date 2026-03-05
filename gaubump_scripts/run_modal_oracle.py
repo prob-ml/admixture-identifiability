@@ -146,6 +146,7 @@ def run_oracle_training():
         rho = U[:, :, 0]
         logsigma = U[:, :, 1]
         xs = jnp.arange(-L, L + 1, dtype=jnp.float32)
+        # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
         logsigma = jnp.clip(logsigma, -4.0, 4.0)
         var = jnp.exp(2.0 * logsigma)
         shapes = rho[:, :, None] * jnp.exp(
@@ -219,6 +220,8 @@ def run_oracle_training():
             return z + dt * v
 
         z = jax.lax.fori_loop(0, n_steps, euler_step, z)
+        # Clamp the logsigma components (odd indices) to prevent downstream NaN.
+        # The output z is flattened as [rho0, ls0, rho1, ls1, ...].
         logsigma_mask = jnp.tile(jnp.array([0.0, 1.0]), model.u_dim // 2)
         z = jnp.where(logsigma_mask, jnp.clip(z, -4.0, 4.0), z)
         return z
