@@ -165,6 +165,8 @@ def run_training():
         rho = U[:, :, 0]
         logsigma = U[:, :, 1]
         xs = jnp.arange(-L, L + 1, dtype=jnp.float32)
+        # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
+        logsigma = jnp.clip(logsigma, -4.0, 4.0)
         var = jnp.exp(2.0 * logsigma)
         shapes = rho[:, :, None] * jnp.exp(
             -xs[None, None, :] ** 2 / (2.0 * var[:, :, None])
@@ -237,6 +239,10 @@ def run_training():
             return z + dt * v
 
         z = jax.lax.fori_loop(0, n_steps, euler_step, z)
+        # Clamp the logsigma components (odd indices) to prevent downstream NaN.
+        # The output z is flattened as [rho0, ls0, rho1, ls1, ...].
+        logsigma_mask = jnp.tile(jnp.array([0.0, 1.0]), model.u_dim // 2)
+        z = jnp.where(logsigma_mask, jnp.clip(z, -4.0, 4.0), z)
         return z
 
     @eqx.filter_jit
@@ -382,6 +388,10 @@ def run_training():
         U_inferred = jax.lax.stop_gradient(
             sample_flow_batch(model, X_true, k_infer)
         )
+
+        # Replace any remaining NaN/Inf with null marks (rho=0, logsigma=0)
+        U_inferred = jnp.where(
+            jnp.isfinite(U_inferred), U_inferred, 0.0)
 
         # (c) Sample new training data from empirical pihat (JIT-compiled)
         U_flat = U_inferred.reshape(-1, 2)

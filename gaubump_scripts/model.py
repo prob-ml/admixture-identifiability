@@ -37,6 +37,8 @@ def shape_fn(rho: jnp.ndarray, logsigma: jnp.ndarray, xs: jnp.ndarray) -> jnp.nd
     rho = jnp.asarray(rho)
     logsigma = jnp.asarray(logsigma)
     xs = jnp.asarray(xs, dtype=jnp.float32)
+    # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
+    logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # sigma^2
     # rho[..., None] * exp(...)  broadcasts over xs
     return rho[..., None] * jnp.exp(-xs**2 / (2.0 * var[..., None]))
@@ -149,6 +151,8 @@ def compute_X(U: jnp.ndarray, L: int) -> jnp.ndarray:
 
     # Vectorised: shapes[tau, dx] = rho_tau * exp(-(dx)^2 / 2*sigma_tau^2)
     # where dx ranges over -L..L
+    # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
+    logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # (T+1,)
     shapes = rho[:, None] * jnp.exp(-xs[None, :] ** 2 / (2.0 * var[:, None]))
     # shapes: (T+1, 2L+1)
@@ -189,6 +193,8 @@ def compute_X_batched(U: jnp.ndarray, L: int) -> jnp.ndarray:
     logsigma = U[:, :, 1]    # (batch, T+1)
 
     xs = jnp.arange(-L, L + 1, dtype=jnp.float32)  # (2L+1,)
+    # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
+    logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # (batch, T+1)
 
     # shapes: (batch, T+1, 2L+1)

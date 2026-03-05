@@ -146,6 +146,10 @@ def train(
             sample_flow_batch(model, X_true, k_infer)
         )  # (n_source, T+1, 2)
 
+        # Replace any remaining NaN/Inf with null marks (rho=0, logsigma=0)
+        U_inferred = jnp.where(
+            jnp.isfinite(U_inferred), U_inferred, 0.0)
+
         # 3. Train one step on fresh samples from empirical pihat (JIT-compiled)
         U_flat = U_inferred.reshape(-1, 2)  # (n_source*(T+1), 2)
         X_new, U_new = sample_XU_empirical(k_data, U_flat, L, T, n_eachstep_samples)

@@ -143,6 +143,10 @@ def sample_flow(model: VelocityMLP, X: jnp.ndarray, key: jax.Array,
         return z + dt * v
 
     z = jax.lax.fori_loop(0, n_steps, euler_step, z)
+    # Clamp the logsigma components (odd indices) to prevent downstream NaN.
+    # The output z is flattened as [rho0, ls0, rho1, ls1, ...].
+    logsigma_mask = jnp.tile(jnp.array([0.0, 1.0]), model.u_dim // 2)
+    z = jnp.where(logsigma_mask, jnp.clip(z, -4.0, 4.0), z)
     return z
 
 
