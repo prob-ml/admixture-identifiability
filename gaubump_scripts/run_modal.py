@@ -264,14 +264,14 @@ def run_training():
         return new_model, new_opt_state, loss
 
     # ================================================================
-    # Training configuration — "easy" case
+    # Training configuration — "easy" case, ~10 min target
     # ================================================================
     L = 3
     T = 20
     null_prob_true = 0.8       # high null prob = easy case
     null_prob_init = 0.5
-    n_phase1_steps = 2000
-    n_phase2_steps = 200
+    n_phase1_steps = 10_000
+    n_phase2_steps = 150_000
     n_init_samples = 256
     n_source = 256
     n_eachstep_samples = 256
@@ -310,7 +310,13 @@ def run_training():
     # Initialise network
     key, model_key = jax.random.split(key)
     model = VelocityMLP(T=T, L=L, hidden_dims=hidden_dims, key=model_key)
-    optimizer = optax.adam(lr)
+    total_steps = n_phase1_steps + n_phase2_steps
+    schedule = optax.cosine_decay_schedule(
+        init_value=lr, decay_steps=total_steps)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate=schedule),
+    )
     opt_state = optimizer.init(model)
 
     # Pre-stack mixture parameters for JIT-compiled sampling
@@ -405,7 +411,7 @@ def run_training():
     # ================================================================
     log("=== Final diagnostic inference ===")
     key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
-    n_diag = 512
+    n_diag = 1024
     X_diag, U_diag_true = sample_XU_mixture(
         k_diag_true, np_true, w_true, m_true, s_true, L, T, n_diag)
     U_diag_inferred = jax.lax.stop_gradient(
@@ -494,7 +500,8 @@ def run_training():
     ax.legend(fontsize=8)
 
     ax = axes[1]
-    ax.hist(U_inf_np[:, 0], bins=80, density=True,
+    rho_finite = U_inf_np[:, 0][np.isfinite(U_inf_np[:, 0])]
+    ax.hist(rho_finite, bins=80, density=True,
             alpha=0.6, color="tab:orange", label="inferred")
     ax.set_xlabel("ρ")
     ax.set_ylabel("density")
