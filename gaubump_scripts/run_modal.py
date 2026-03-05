@@ -38,7 +38,6 @@ def run_training():
     import subprocess
     import threading
     import time as time_mod
-    from functools import partial
 
     import jax
     import jax.numpy as jnp
