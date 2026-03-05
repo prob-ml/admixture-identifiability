@@ -61,6 +61,7 @@ def run_training():
 
     # ----------------------------------------------------------------
     # GPU utilization monitor (background thread)
+    # Poll every 3 s for finer-grained visibility during experiments.
     # ----------------------------------------------------------------
     gpu_log_lines: list[str] = []
     _gpu_active = True
@@ -85,7 +86,7 @@ def run_training():
                     log(f"[GPU] {line}")
             except Exception:
                 pass
-            time_mod.sleep(15)
+            time_mod.sleep(3)
 
     gpu_thread = threading.Thread(target=_poll_gpu, daemon=True)
     gpu_thread.start()
@@ -307,13 +308,27 @@ def run_training():
     log(f"=== Phase I ({n_phase1_steps} steps) ===")
     log_interval_p1 = max(1, n_phase1_steps // 20)
     t_phase1 = time_mod.time()
+    p1_datagen_s = 0.0
+    p1_grad_s = 0.0
 
     for step in range(n_phase1_steps):
         key, k_data, k_step = jax.random.split(key, 3)
+
+        t0 = time_mod.time()
         X, U = sample_XU(k_data, pihat, L, T, n_init_samples)
+        # Force data onto device before timing the grad step.
+        jax.block_until_ready((X, U))
+        t1 = time_mod.time()
+
         # update_step is fully JIT'd — returns device arrays, no sync.
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U, X, k_step)
+        jax.block_until_ready(loss)
+        t2 = time_mod.time()
+
+        p1_datagen_s += t1 - t0
+        p1_grad_s += t2 - t1
+
         # Sync with GPU only at epoch boundaries to read the loss.
         if step % log_interval_p1 == 0 or step == n_phase1_steps - 1:
             log(f"  step {step:5d}  loss={float(loss):.6f}")
@@ -323,6 +338,10 @@ def run_training():
     dt_p1 = time_mod.time() - t_phase1
     log(f"Phase I complete in {dt_p1:.1f}s "
         f"({dt_p1 / n_phase1_steps * 1000:.1f} ms/step)")
+    log(f"  breakdown: data_gen={p1_datagen_s:.1f}s "
+        f"({p1_datagen_s / n_phase1_steps * 1000:.1f} ms/step)  "
+        f"grad_step={p1_grad_s:.1f}s "
+        f"({p1_grad_s / n_phase1_steps * 1000:.1f} ms/step)")
 
     # ================================================================
     # Phase II — iterative refinement
@@ -330,20 +349,46 @@ def run_training():
     log(f"=== Phase II ({n_phase2_steps} iterations) ===")
     log_interval_p2 = max(1, n_phase2_steps // 20)
     t_phase2 = time_mod.time()
+    p2_true_datagen_s = 0.0
+    p2_inference_s = 0.0
+    p2_emp_datagen_s = 0.0
+    p2_grad_s = 0.0
 
     for step in range(n_phase2_steps):
         key, k_true, k_infer, k_data, k_step = jax.random.split(key, 5)
+
+        # (a) Generate data from the true distribution
+        t0 = time_mod.time()
         X_true, _ = sample_XU(k_true, pi_true, L, T, n_source)
+        jax.block_until_ready(X_true)
+        t1 = time_mod.time()
+
+        # (b) Infer U with the current flow model
         U_inferred = jax.lax.stop_gradient(
             sample_flow_batch(model, X_true, k_infer)
         )
+        jax.block_until_ready(U_inferred)
+        t2 = time_mod.time()
+
+        # (c) Build empirical pihat and sample new training data
         U_flat = U_inferred.reshape(-1, 2)
         pihat_emp = EmpiricalDistribution(samples=U_flat)
         X_new, U_new = sample_XU(
             k_data, pihat_emp, L, T, n_eachstep_samples)
-        # update_step is fully JIT'd — no sync until float() below.
+        jax.block_until_ready((X_new, U_new))
+        t3 = time_mod.time()
+
+        # (d) Gradient step — fully JIT'd, no sync until float() below.
         model, opt_state, loss = update_step(
             model, opt_state, optimizer, U_new, X_new, k_step)
+        jax.block_until_ready(loss)
+        t4 = time_mod.time()
+
+        p2_true_datagen_s += t1 - t0
+        p2_inference_s += t2 - t1
+        p2_emp_datagen_s += t3 - t2
+        p2_grad_s += t4 - t3
+
         # Sync only at epoch boundaries.
         if step % log_interval_p2 == 0 or step == n_phase2_steps - 1:
             mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
@@ -358,6 +403,15 @@ def run_training():
     dt_p2 = time_mod.time() - t_phase2
     log(f"Phase II complete in {dt_p2:.1f}s "
         f"({dt_p2 / n_phase2_steps * 1000:.1f} ms/step)")
+    log(f"  breakdown per step:")
+    log(f"    true_datagen  = {p2_true_datagen_s:.1f}s "
+        f"({p2_true_datagen_s / n_phase2_steps * 1000:.1f} ms/step)")
+    log(f"    flow_infer    = {p2_inference_s:.1f}s "
+        f"({p2_inference_s / n_phase2_steps * 1000:.1f} ms/step)")
+    log(f"    emp_datagen   = {p2_emp_datagen_s:.1f}s "
+        f"({p2_emp_datagen_s / n_phase2_steps * 1000:.1f} ms/step)")
+    log(f"    grad_step     = {p2_grad_s:.1f}s "
+        f"({p2_grad_s / n_phase2_steps * 1000:.1f} ms/step)")
 
     # ================================================================
     # Final diagnostic inference

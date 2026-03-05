@@ -1,58 +1,84 @@
-[    0.1s] [GPU] 2026/03/05 00:16:16.887, 0 %, 0 %, 0 MiB, 15360 MiB, 25
-[    1.7s] JAX devices: [CudaDevice(id=0)]
-[    1.7s] JAX default backend: gpu
-[    6.3s] === Phase I (2000 steps) ===
-[   15.1s] [GPU] 2026/03/05 00:16:31.986, 20 %, 3 %, 11313 MiB, 15360 MiB, 27
-[   16.7s]   step     0  loss=1.924944
-[   18.3s]   step   100  loss=1.570850
-[   19.9s]   step   200  loss=1.459835
-[   21.4s]   step   300  loss=1.482907
-[   23.4s]   step   400  loss=1.438326
-[   26.2s]   step   500  loss=1.342080
-[   28.0s]   step   600  loss=1.279007
-[   29.9s]   step   700  loss=1.207992
-[   30.2s] [GPU] 2026/03/05 00:16:47.048, 5 %, 0 %, 11313 MiB, 15360 MiB, 28
-[   31.7s]   step   800  loss=1.167878
-[   33.5s]   step   900  loss=1.226450
-[   35.0s]   step  1000  loss=1.139535
+[    0.1s] [GPU] 2026/03/05 02:07:23.067, 0 %, 0 %, 0 MiB, 15360 MiB, 22
+[    1.6s] JAX devices: [CudaDevice(id=0)]
+[    1.6s] JAX default backend: gpu
+[    3.2s] [GPU] 2026/03/05 02:07:26.170, 0 %, 0 %, 11299 MiB, 15360 MiB, 23
+[    6.2s] [GPU] 2026/03/05 02:07:29.226, 0 %, 0 %, 11299 MiB, 15360 MiB, 23
+[    6.9s] === Phase I (2000 steps) ===
+[    9.3s] [GPU] 2026/03/05 02:07:32.274, 0 %, 0 %, 11299 MiB, 15360 MiB, 24
+[   12.3s] [GPU] 2026/03/05 02:07:35.314, 0 %, 0 %, 11299 MiB, 15360 MiB, 24
+[   15.5s] [GPU] 2026/03/05 02:07:38.356, 9 %, 1 %, 11313 MiB, 15360 MiB, 24
+[   17.7s]   step     0  loss=1.924944
+[   18.6s] [GPU] 2026/03/05 02:07:41.637, 4 %, 0 %, 11313 MiB, 15360 MiB, 24
+[   19.6s]   step   100  loss=1.570850
+[   21.1s]   step   200  loss=1.459835
+[   21.7s] [GPU] 2026/03/05 02:07:44.695, 6 %, 0 %, 11313 MiB, 15360 MiB, 25
+[   22.7s]   step   300  loss=1.482907
+[   24.6s]   step   400  loss=1.438326
+[   24.7s] [GPU] 2026/03/05 02:07:47.736, 6 %, 0 %, 11313 MiB, 15360 MiB, 25
+[   26.1s]   step   500  loss=1.342080
+[   27.6s]   step   600  loss=1.279007
+[   27.8s] [GPU] 2026/03/05 02:07:50.777, 6 %, 0 %, 11313 MiB, 15360 MiB, 25
+[   29.1s]   step   700  loss=1.207992
+[   30.8s] [GPU] 2026/03/05 02:07:53.822, 6 %, 0 %, 11313 MiB, 15360 MiB, 25
+[   30.9s]   step   800  loss=1.167878
+[   32.3s]   step   900  loss=1.226450
+[   34.0s] [GPU] 2026/03/05 02:07:56.956, 2 %, 0 %, 11313 MiB, 15360 MiB, 25
+[   34.7s]   step  1000  loss=1.139535
 [   36.6s]   step  1100  loss=1.183948
-[   38.2s]   step  1200  loss=1.156576
-[   39.7s]   step  1300  loss=1.168182
-[   41.4s]   step  1400  loss=1.132129
-[   43.0s]   step  1500  loss=1.138261
-[   44.6s]   step  1600  loss=1.220272
-[   45.3s] [GPU] 2026/03/05 00:17:02.105, 5 %, 0 %, 11313 MiB, 15360 MiB, 28
-[   46.1s]   step  1700  loss=1.168055
-[   47.7s]   step  1800  loss=1.162591
-[   49.1s]   step  1900  loss=1.188713
-[   50.6s]   step  1999  loss=1.136378
-[   50.6s] Phase I complete in 44.3s (22.1 ms/step)
-[   50.6s] === Phase II (200 iterations) ===
-[   56.6s]   iter     0  loss=0.993540  mean|rho|=0.496  frac(|rho|<0.1)=0.167
-[   56.9s]   iter    10  loss=0.811455  mean|rho|=0.427  frac(|rho|<0.1)=0.190
-[   57.1s]   iter    20  loss=0.724062  mean|rho|=0.406  frac(|rho|<0.1)=0.203
-[   57.4s]   iter    30  loss=0.757597  mean|rho|=0.417  frac(|rho|<0.1)=0.211
-[   57.7s]   iter    40  loss=0.682265  mean|rho|=0.395  frac(|rho|<0.1)=0.223
-[   58.0s]   iter    50  loss=0.712250  mean|rho|=0.402  frac(|rho|<0.1)=0.223
-[   58.3s]   iter    60  loss=0.659953  mean|rho|=0.384  frac(|rho|<0.1)=0.228
-[   58.6s]   iter    70  loss=0.673335  mean|rho|=0.395  frac(|rho|<0.1)=0.236
-[   58.9s]   iter    80  loss=0.660766  mean|rho|=0.390  frac(|rho|<0.1)=0.224
-[   59.1s]   iter    90  loss=0.691044  mean|rho|=0.384  frac(|rho|<0.1)=0.228
-[   59.4s]   iter   100  loss=0.657985  mean|rho|=0.401  frac(|rho|<0.1)=0.216
-[   59.7s]   iter   110  loss=0.624048  mean|rho|=0.386  frac(|rho|<0.1)=0.231
-[   60.0s]   iter   120  loss=0.653573  mean|rho|=0.389  frac(|rho|<0.1)=0.222
-[   60.3s]   iter   130  loss=0.649917  mean|rho|=0.403  frac(|rho|<0.1)=0.228
-[   60.3s] [GPU] 2026/03/05 00:17:17.146, 13 %, 0 %, 11313 MiB, 15360 MiB, 28
-[   60.6s]   iter   140  loss=0.613841  mean|rho|=0.393  frac(|rho|<0.1)=0.237
-[   60.9s]   iter   150  loss=0.608963  mean|rho|=0.385  frac(|rho|<0.1)=0.238
-[   61.1s]   iter   160  loss=0.610835  mean|rho|=0.390  frac(|rho|<0.1)=0.250
-[   61.4s]   iter   170  loss=0.564852  mean|rho|=0.396  frac(|rho|<0.1)=0.240
-[   61.7s]   iter   180  loss=0.642581  mean|rho|=0.403  frac(|rho|<0.1)=0.238
-[   62.0s]   iter   190  loss=0.601193  mean|rho|=0.389  frac(|rho|<0.1)=0.225
-[   62.3s]   iter   199  loss=0.582265  mean|rho|=0.405  frac(|rho|<0.1)=0.243
-[   62.3s] Phase II complete in 11.6s (58.1 ms/step)
-[   62.3s] === Final diagnostic inference ===
-[   69.8s]   n_diag=512, total U pairs=10752
-[   69.8s]   frac(|rho|<0.1) inferred = 0.241
-[   69.8s]   true null_prob            = 0.8
-[   69.8s]   total wall time           = 69.8s
+[   37.0s] [GPU] 2026/03/05 02:08:00.009, 6 %, 0 %, 11313 MiB, 15360 MiB, 25
+[   38.3s]   step  1200  loss=1.156576
+[   40.1s] [GPU] 2026/03/05 02:08:03.061, 5 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   40.1s]   step  1300  loss=1.168182
+[   41.9s]   step  1400  loss=1.132129
+[   43.2s] [GPU] 2026/03/05 02:08:06.203, 4 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   44.2s]   step  1500  loss=1.138261
+[   46.3s] [GPU] 2026/03/05 02:08:09.296, 4 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   46.5s]   step  1600  loss=1.220272
+[   48.5s]   step  1700  loss=1.168055
+[   49.4s] [GPU] 2026/03/05 02:08:12.390, 4 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   50.6s]   step  1800  loss=1.162591
+[   52.5s] [GPU] 2026/03/05 02:08:15.477, 3 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   53.1s]   step  1900  loss=1.188713
+[   55.0s]   step  1999  loss=1.136378
+[   55.0s] Phase I complete in 48.1s (24.1 ms/step)
+[   55.0s]   breakdown: data_gen=39.4s (19.7 ms/step)  grad_step=6.7s (3.4 ms/step)
+[   55.0s] === Phase II (200 iterations) ===
+[   55.6s] [GPU] 2026/03/05 02:08:18.560, 0 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   58.6s] [GPU] 2026/03/05 02:08:21.619, 0 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   61.7s] [GPU] 2026/03/05 02:08:24.677, 0 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   62.0s]   iter     0  loss=0.993540  mean|rho|=0.496  frac(|rho|<0.1)=0.167
+[   62.4s]   iter    10  loss=0.811455  mean|rho|=0.427  frac(|rho|<0.1)=0.190
+[   62.8s]   iter    20  loss=0.724062  mean|rho|=0.406  frac(|rho|<0.1)=0.203
+[   63.1s]   iter    30  loss=0.757597  mean|rho|=0.417  frac(|rho|<0.1)=0.211
+[   63.5s]   iter    40  loss=0.682265  mean|rho|=0.395  frac(|rho|<0.1)=0.223
+[   63.9s]   iter    50  loss=0.712250  mean|rho|=0.402  frac(|rho|<0.1)=0.223
+[   64.2s]   iter    60  loss=0.659953  mean|rho|=0.384  frac(|rho|<0.1)=0.228
+[   64.5s]   iter    70  loss=0.673335  mean|rho|=0.395  frac(|rho|<0.1)=0.236
+[   64.7s] [GPU] 2026/03/05 02:08:27.721, 12 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   64.8s]   iter    80  loss=0.660766  mean|rho|=0.390  frac(|rho|<0.1)=0.224
+[   65.1s]   iter    90  loss=0.691044  mean|rho|=0.384  frac(|rho|<0.1)=0.228
+[   65.4s]   iter   100  loss=0.657985  mean|rho|=0.401  frac(|rho|<0.1)=0.216
+[   65.8s]   iter   110  loss=0.624048  mean|rho|=0.386  frac(|rho|<0.1)=0.231
+[   66.2s]   iter   120  loss=0.653573  mean|rho|=0.389  frac(|rho|<0.1)=0.222
+[   66.5s]   iter   130  loss=0.649917  mean|rho|=0.403  frac(|rho|<0.1)=0.228
+[   66.7s]   iter   140  loss=0.613841  mean|rho|=0.393  frac(|rho|<0.1)=0.237
+[   67.0s]   iter   150  loss=0.608963  mean|rho|=0.385  frac(|rho|<0.1)=0.238
+[   67.2s]   iter   160  loss=0.610835  mean|rho|=0.390  frac(|rho|<0.1)=0.250
+[   67.5s]   iter   170  loss=0.564852  mean|rho|=0.396  frac(|rho|<0.1)=0.240
+[   67.8s] [GPU] 2026/03/05 02:08:30.761, 15 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   67.8s]   iter   180  loss=0.642581  mean|rho|=0.403  frac(|rho|<0.1)=0.238
+[   68.0s]   iter   190  loss=0.601193  mean|rho|=0.389  frac(|rho|<0.1)=0.225
+[   68.3s]   iter   199  loss=0.582265  mean|rho|=0.405  frac(|rho|<0.1)=0.243
+[   68.3s] Phase II complete in 13.3s (66.5 ms/step)
+[   68.3s]   breakdown per step:
+[   68.3s]     true_datagen  = 4.8s (24.2 ms/step)
+[   68.3s]     flow_infer    = 2.9s (14.6 ms/step)
+[   68.3s]     emp_datagen   = 2.8s (14.2 ms/step)
+[   68.3s]     grad_step     = 0.4s (1.8 ms/step)
+[   68.3s] === Final diagnostic inference ===
+[   70.8s] [GPU] 2026/03/05 02:08:33.807, 0 %, 0 %, 11313 MiB, 15360 MiB, 26
+[   73.9s] [GPU] 2026/03/05 02:08:36.867, 25 %, 4 %, 11313 MiB, 15360 MiB, 27
+[   75.8s]   n_diag=512, total U pairs=10752
+[   75.8s]   frac(|rho|<0.1) inferred = 0.241
+[   75.8s]   true null_prob            = 0.8
+[   75.8s]   total wall time           = 75.8s
