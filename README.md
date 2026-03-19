@@ -28,3 +28,4 @@ This repository contains code for running simulations that test the identifiabil
 * `scripts/plot_finite_data_sims.py` plots the results of the above
 * `scripts/run_infinite_data.py` runs the algorithm with infinite data, tracking the optimization progress
 * `scripts/plot_infinite_data_sims.py` plots the results of the above
+* `gaubump_scripts/` a continuous mark-space variant (Gaussian bumps on $\mathbb{R}^2$) using rectified flow matching in JAX — see `gaubump_scripts/README.md`
