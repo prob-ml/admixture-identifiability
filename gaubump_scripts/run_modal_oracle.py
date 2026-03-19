@@ -121,7 +121,7 @@ def run_oracle_training():
         z = jax.random.normal(k_gauss, shape=(total, 2))
         non_null = chosen_mean + chosen_std * z
         null_ls = jax.random.normal(k_null, shape=(total,))
-        null = jnp.stack([jnp.zeros(total), null_ls], axis=-1)
+        null = jnp.stack([jnp.full(total, -10.0), null_ls], axis=-1)
         marks = jnp.where(is_null[:, None], null, non_null)
         U = marks.reshape(n_samples, T + 1, 2)
         X = compute_X_batched(U, L)
@@ -149,7 +149,7 @@ def run_oracle_training():
         # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
         logsigma = jnp.clip(logsigma, -4.0, 4.0)
         var = jnp.exp(2.0 * logsigma)
-        shapes = rho[:, :, None] * jnp.exp(
+        shapes = jax.nn.softplus(rho)[:, :, None] * jnp.exp(
             -xs[None, None, :] ** 2 / (2.0 * var[:, :, None])
         )
         tau_grid = jnp.arange(T_plus_1)[:, None]

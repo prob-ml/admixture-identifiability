@@ -146,9 +146,10 @@ def train(
             sample_flow_batch(model, X_true, k_infer)
         )  # (n_source, T+1, 2)
 
-        # Replace any remaining NaN/Inf with null marks (rho=0, logsigma=0)
+        # Replace any remaining NaN/Inf with null marks (rho=-10, logsigma=0)
+        null_mark = jnp.array([-10.0, 0.0])
         U_inferred = jnp.where(
-            jnp.isfinite(U_inferred), U_inferred, 0.0)
+            jnp.isfinite(U_inferred), U_inferred, null_mark)
 
         # 3. Train one step on fresh samples from empirical pihat (JIT-compiled)
         U_flat = U_inferred.reshape(-1, 2)  # (n_source*(T+1), 2)
@@ -158,10 +159,10 @@ def train(
         if step % max(1, n_phase2_steps // 20) == 0 or step == n_phase2_steps - 1:
             # Quick diagnostic: mean |rho| in inferred U
             mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
-            frac_small_rho = float(jnp.mean(jnp.abs(U_flat[:, 0]) < 0.1))
+            frac_null = float(jnp.mean(jax.nn.softplus(U_flat[:, 0]) < 0.1))
             print(
                 f"  iter {step:5d}  loss={float(loss):.6f}  "
-                f"mean|rho|={mean_rho:.3f}  frac(|rho|<0.1)={frac_small_rho:.3f}"
+                f"mean|rho|={mean_rho:.3f}  frac(softplus(rho)<0.1)={frac_null:.3f}"
             )
 
     # ------------------------------------------------------------------
@@ -176,9 +177,9 @@ def train(
         sample_flow_batch(model, X_diag, k_diag_infer)
     )
     U_diag_flat = U_diag_inferred.reshape(-1, 2)
-    frac_near_zero = float(jnp.mean(jnp.abs(U_diag_flat[:, 0]) < 0.1))
+    frac_near_zero = float(jnp.mean(jax.nn.softplus(U_diag_flat[:, 0]) < 0.1))
     print(f"  n_diag={n_diag}, total U pairs={U_diag_flat.shape[0]}")
-    print(f"  frac(|rho|<0.1)={frac_near_zero:.3f}  (true null_prob={null_prob_true})")
+    print(f"  frac(softplus(rho)<0.1)={frac_near_zero:.3f}  (true null_prob={null_prob_true})")
 
     print("\nDone.")
     return {

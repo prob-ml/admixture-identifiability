@@ -1,8 +1,12 @@
 """Generative model for the Gaussian-bump additive process.
 
 Mark space S = R^2, with each mark (rho, logsigma) defining a shape
-    f(x) = rho * exp(-x^2 / (2 * exp(2*logsigma)))
+    f(x) = softplus(rho) * exp(-x^2 / (2 * exp(2*logsigma)))
 on the integer grid {-L, ..., L}.
+
+The softplus nonlinearity ensures positive amplitudes and allows the
+model to represent "zero" (null marks at rho = -10) with a smooth
+gradient signal.
 
 Given a shape distribution pi, a draw of the observation X in R^{T-2L+1}
 is produced by sampling U_t ~ pi for t in {0,...,T} and summing the
@@ -24,10 +28,10 @@ from typing import NamedTuple
 def shape_fn(rho: jnp.ndarray, logsigma: jnp.ndarray, xs: jnp.ndarray) -> jnp.ndarray:
     """Evaluate the Gaussian bump shape at integer positions *xs*.
 
-    f(x) = rho * exp(-x^2 / (2 * exp(2*logsigma)))
+    f(x) = softplus(rho) * exp(-x^2 / (2 * exp(2*logsigma)))
 
     Args:
-        rho:      scalar or array of amplitudes
+        rho:      scalar or array of pre-softplus amplitudes
         logsigma: scalar or array of log-scale parameters
         xs:       1-D array of integer positions, e.g. jnp.arange(-L, L+1)
 
@@ -40,8 +44,8 @@ def shape_fn(rho: jnp.ndarray, logsigma: jnp.ndarray, xs: jnp.ndarray) -> jnp.nd
     # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
     logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # sigma^2
-    # rho[..., None] * exp(...)  broadcasts over xs
-    return rho[..., None] * jnp.exp(-xs**2 / (2.0 * var[..., None]))
+    # softplus(rho)[..., None] * exp(...)  broadcasts over xs
+    return jax.nn.softplus(rho)[..., None] * jnp.exp(-xs**2 / (2.0 * var[..., None]))
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +62,9 @@ class GaussianComponent(NamedTuple):
 class ShapeDistribution(NamedTuple):
     """Mixture distribution on R^2 = (rho, logsigma).
 
-    With probability *null_prob* we emit (0, logsigma) where logsigma is
-    drawn from a standard normal (the value is irrelevant since rho=0).
+    With probability *null_prob* we emit (-10, logsigma) where logsigma is
+    drawn from a standard normal.  The amplitude softplus(-10) ≈ 4.5e-5 is
+    effectively null, giving only very faint background noise.
     Otherwise we draw from a mixture of axis-aligned Gaussians given by
     *components*.
     """
@@ -116,9 +121,9 @@ def _sample_mixture(key: jax.Array, pi: ShapeDistribution, n: int) -> jnp.ndarra
     z = jax.random.normal(k_gauss, shape=(n, 2))
     non_null_samples = chosen_mean + chosen_std * z
 
-    # Null samples: rho=0, logsigma irrelevant (draw from N(0,1))
+    # Null samples: rho=-10 so softplus(rho)≈0, logsigma from N(0,1)
     null_logsigma = jax.random.normal(k_null, shape=(n,))
-    null_samples = jnp.stack([jnp.zeros(n), null_logsigma], axis=-1)
+    null_samples = jnp.stack([jnp.full(n, -10.0), null_logsigma], axis=-1)
 
     # Combine
     marks = jnp.where(is_null[:, None], null_samples, non_null_samples)
@@ -149,12 +154,12 @@ def compute_X(U: jnp.ndarray, L: int) -> jnp.ndarray:
     # Integer grid for the shape support
     xs = jnp.arange(-L, L + 1, dtype=jnp.float32)  # (2L+1,)
 
-    # Vectorised: shapes[tau, dx] = rho_tau * exp(-(dx)^2 / 2*sigma_tau^2)
+    # Vectorised: shapes[tau, dx] = softplus(rho_tau) * exp(-(dx)^2 / 2*sigma_tau^2)
     # where dx ranges over -L..L
     # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
     logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # (T+1,)
-    shapes = rho[:, None] * jnp.exp(-xs[None, :] ** 2 / (2.0 * var[:, None]))
+    shapes = jax.nn.softplus(rho)[:, None] * jnp.exp(-xs[None, :] ** 2 / (2.0 * var[:, None]))
     # shapes: (T+1, 2L+1)
 
     # X_t = sum_{tau} shapes[tau, t - tau] for t in {L,...,T-L}.
@@ -198,7 +203,7 @@ def compute_X_batched(U: jnp.ndarray, L: int) -> jnp.ndarray:
     var = jnp.exp(2.0 * logsigma)  # (batch, T+1)
 
     # shapes: (batch, T+1, 2L+1)
-    shapes = rho[:, :, None] * jnp.exp(
+    shapes = jax.nn.softplus(rho)[:, :, None] * jnp.exp(
         -xs[None, None, :] ** 2 / (2.0 * var[:, :, None])
     )
 
@@ -286,7 +291,7 @@ def sample_XU_mixture(key, null_prob, weights, means, stds, L, T, n_samples):
     non_null = chosen_mean + chosen_std * z
 
     null_ls = jax.random.normal(k_null, shape=(total,))
-    null = jnp.stack([jnp.zeros(total), null_ls], axis=-1)
+    null = jnp.stack([jnp.full(total, -10.0), null_ls], axis=-1)
 
     marks = jnp.where(is_null[:, None], null, non_null)
     U = marks.reshape(n_samples, T + 1, 2)

@@ -5,7 +5,12 @@ Each run produces a self-contained results subdirectory under
 ``gaubump_scripts/results/<case_name>/`` containing training logs,
 GPU utilisation, and diagnostic plots — including visualisations of what
 the true-X and pihat-X training data actually look like (with rug-plots
-marking positions where ρ ≠ 0).
+marking positions where the amplitude softplus(ρ) is appreciable).
+
+The shape function uses a softplus nonlinearity:
+    f(x) = softplus(rho) * exp(-x^2 / (2 * exp(2*logsigma)))
+so that null marks (rho ≈ -10, softplus(-10) ≈ 0) produce only very faint
+background noise rather than an exact zero.
 
 The full pipeline (Phase I warm-up + Phase II bootstrap) never sees
 ground-truth (X, U) pairs.  Phase I trains on synthetic (X, U) drawn
@@ -138,7 +143,7 @@ def run_training():
         z = jax.random.normal(k_gauss, shape=(total, 2))
         non_null = chosen_mean + chosen_std * z
         null_ls = jax.random.normal(k_null, shape=(total,))
-        null = jnp.stack([jnp.zeros(total), null_ls], axis=-1)
+        null = jnp.stack([jnp.full(total, -10.0), null_ls], axis=-1)
         marks = jnp.where(is_null[:, None], null, non_null)
         U = marks.reshape(n_samples, T + 1, 2)
         X = compute_X_batched(U, L)
@@ -179,7 +184,7 @@ def run_training():
         xs = jnp.arange(-L, L + 1, dtype=jnp.float32)
         logsigma = jnp.clip(logsigma, -4.0, 4.0)
         var = jnp.exp(2.0 * logsigma)
-        shapes = rho[:, :, None] * jnp.exp(
+        shapes = jax.nn.softplus(rho)[:, :, None] * jnp.exp(
             -xs[None, None, :] ** 2 / (2.0 * var[:, :, None])
         )
         tau_grid = jnp.arange(T_plus_1)[:, None]
@@ -277,7 +282,7 @@ def run_training():
     # ██  CASE CONFIGURATION  ██
     # Change these for each case study.
     # ================================================================
-    case_name = "case_np95_pihat95"
+    case_name = "case_softplus_np95_pihat95"
 
     L = 3
     T = 20
@@ -389,7 +394,7 @@ def run_training():
     results: dict[str, bytes] = {}
 
     def _plot_xdata(X_np, U_np, suptitle, n_show):
-        """Plot X observations with rug-plots marking where rho != 0."""
+        """Plot X observations with rug-plots marking where softplus(rho) is appreciable."""
         n_obs = X_np.shape[1]    # T - 2L + 1
         T_plus_1 = U_np.shape[1]
         obs_grid = np.arange(n_obs)
@@ -405,24 +410,21 @@ def run_training():
             ax.bar(obs_grid, X_np[idx], width=0.8, alpha=0.6,
                    color="tab:blue", label="X")
 
-            # Rug-plot: mark time-positions where |rho| > 0.05
+            # Rug-plot: mark time-positions where softplus(rho) > 0.05
             rhos = U_np[idx, :, 0]       # shape (T+1,)
+            amps = np.log1p(np.exp(rhos))  # softplus
             for tau in range(T_plus_1):
-                if abs(rhos[tau]) > 0.05:
-                    # Map mark time tau to observation index:
-                    # observation indices run from L to T-L, i.e. obs[i] = i + L
-                    # Mark at tau contributes to obs indices tau-L … tau+L
-                    # but the central contribution is at obs index tau - L
+                if amps[tau] > 0.05:
                     obs_pos = tau - L
                     if 0 <= obs_pos < n_obs:
                         ax.axvline(obs_pos, color="red", alpha=0.6,
                                    lw=1.5, ls="--")
                         ax.text(obs_pos, ax.get_ylim()[1] * 0.95,
-                                f"ρ={rhos[tau]:.2f}",
+                                f"sp={amps[tau]:.2f}",
                                 fontsize=6, color="red",
                                 ha="center", va="top", rotation=90)
 
-            nonnull_count = int(np.sum(np.abs(rhos) > 0.05))
+            nonnull_count = int(np.sum(amps > 0.05))
             ax.set_title(f"Sample {idx}  ({nonnull_count} non-null marks)",
                          fontsize=9)
             ax.set_xlabel("obs index")
@@ -493,11 +495,11 @@ def run_training():
     U_p1d_inferred = jax.lax.stop_gradient(
         sample_flow_batch(model, X_p1d, k_p1d_inf))
     U_p1d_flat = U_p1d_inferred.reshape(-1, 2)
-    frac_p1 = float(jnp.mean(jnp.abs(U_p1d_flat[:, 0]) < 0.1))
+    frac_p1 = float(jnp.mean(jax.nn.softplus(U_p1d_flat[:, 0]) < 0.1))
     mean_rho_p1 = float(jnp.mean(jnp.abs(U_p1d_flat[:, 0])))
     log(f"  After Phase I (trained on pihat null_prob={null_prob_init}):")
-    log(f"  frac(|rho|<0.1) = {frac_p1:.3f}  (target={null_prob_true})")
-    log(f"  mean|rho|        = {mean_rho_p1:.3f}")
+    log(f"  frac(softplus(rho)<0.1) = {frac_p1:.3f}  (target={null_prob_true})")
+    log(f"  mean|rho|               = {mean_rho_p1:.3f}")
 
     # ================================================================
     # Phase II — iterative refinement
@@ -536,7 +538,8 @@ def run_training():
             sample_flow_batch(model, X_true, k_infer)
         )
         U_inferred = jnp.where(
-            jnp.isfinite(U_inferred), U_inferred, 0.0)
+            jnp.isfinite(U_inferred), U_inferred,
+            jnp.array([-10.0, 0.0]))
 
         # (c) Sample new training data from empirical pihat
         U_flat = U_inferred.reshape(-1, 2)
@@ -549,12 +552,12 @@ def run_training():
 
         if should_log_p2(step):
             mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
-            frac_small = float(jnp.mean(jnp.abs(U_flat[:, 0]) < 0.1))
+            frac_null = float(jnp.mean(jax.nn.softplus(U_flat[:, 0]) < 0.1))
             current_lr = float(schedule_p2(step))
             log(
                 f"  iter {step:6d}  loss={float(loss):.6f}  "
                 f"mean|rho|={mean_rho:.3f}  "
-                f"frac(|rho|<0.1)={frac_small:.3f}  "
+                f"frac(sp(rho)<0.1)={frac_null:.3f}  "
                 f"lr={current_lr:.6f}"
             )
 
@@ -577,11 +580,11 @@ def run_training():
     U_diag_flat = U_diag_inferred.reshape(-1, 2)
     U_true_flat = U_diag_true.reshape(-1, 2)
 
-    frac_near_zero = float(jnp.mean(jnp.abs(U_diag_flat[:, 0]) < 0.1))
+    frac_near_zero = float(jnp.mean(jax.nn.softplus(U_diag_flat[:, 0]) < 0.1))
     log(f"  n_diag={n_diag}, total U pairs={U_diag_flat.shape[0]}")
-    log(f"  frac(|rho|<0.1) inferred = {frac_near_zero:.3f}")
-    log(f"  true null_prob            = {null_prob_true}")
-    log(f"  post-Phase-I frac         = {frac_p1:.3f}")
+    log(f"  frac(softplus(rho)<0.1) inferred = {frac_near_zero:.3f}")
+    log(f"  true null_prob                    = {null_prob_true}")
+    log(f"  post-Phase-I frac                 = {frac_p1:.3f}")
     log(f"  total wall time           = {time_mod.time() - _t0:.1f}s")
 
     # ================================================================
@@ -610,9 +613,9 @@ def run_training():
                s=1, alpha=0.3, c="tab:blue", label="true π samples")
     ax.set_xlabel("ρ"); ax.set_ylabel("log σ")
     ax.set_title(f"Ground-truth π\n(null_prob={null_prob_true})")
-    ax.axvline(0, color="red", lw=0.8, ls="--", label="ρ=0 (null)")
+    ax.axvline(-10, color="red", lw=0.8, ls="--", label="ρ=−10 (null)")
     ax.legend(fontsize=8)
-    ax.set_xlim(-1, 3.5); ax.set_ylim(-3, 3)
+    ax.set_xlim(-12, 4); ax.set_ylim(-3, 3)
 
     ax = axes[1]
     ax.scatter(U_p1d_np[:, 0], U_p1d_np[:, 1],
@@ -621,10 +624,10 @@ def run_training():
     frac_p1_str = f"{frac_p1:.1%}"
     ax.set_title(
         f"Post-Phase-I inference\n"
-        f"frac(|ρ|<0.1)={frac_p1_str}  (pihat null_prob={null_prob_init})")
-    ax.axvline(0, color="red", lw=0.8, ls="--", label="ρ=0 (null)")
+        f"frac(sp(ρ)<0.1)={frac_p1_str}  (pihat null_prob={null_prob_init})")
+    ax.axvline(-10, color="red", lw=0.8, ls="--", label="ρ=−10 (null)")
     ax.legend(fontsize=8)
-    ax.set_xlim(-1, 3.5); ax.set_ylim(-3, 3)
+    ax.set_xlim(-12, 4); ax.set_ylim(-3, 3)
 
     ax = axes[2]
     ax.scatter(U_inf_np[:, 0], U_inf_np[:, 1],
@@ -633,16 +636,16 @@ def run_training():
     frac_str = f"{frac_near_zero:.1%}"
     ax.set_title(
         f"Final (post-Phase-II)\n"
-        f"frac(|ρ|<0.1)={frac_str}  (true null={null_prob_true})")
-    ax.axvline(0, color="red", lw=0.8, ls="--", label="ρ=0 (null)")
+        f"frac(sp(ρ)<0.1)={frac_str}  (true null={null_prob_true})")
+    ax.axvline(-10, color="red", lw=0.8, ls="--", label="ρ=−10 (null)")
     ax.legend(fontsize=8)
-    ax.set_xlim(-1, 3.5); ax.set_ylim(-3, 3)
+    ax.set_xlim(-12, 4); ax.set_ylim(-3, 3)
 
     fig.suptitle(
         f"{case_name}  L={L}, T={T}, seed={seed}\n"
         f"null_prob_true={null_prob_true}, null_prob_init={null_prob_init}, "
         f"phase1={n_phase1_steps}, phase2={n_phase2_steps}  "
-        f"[Phase II: fresh optimizer]",
+        f"[softplus(ρ) shape, Phase II: fresh optimizer]",
         fontsize=11)
     fig.tight_layout()
     buf = io.BytesIO()
@@ -658,23 +661,23 @@ def run_training():
             alpha=0.6, color="tab:blue", label="true π")
     ax.set_xlabel("ρ"); ax.set_ylabel("density")
     ax.set_title("Ground-truth marginal of ρ")
-    ax.axvline(0, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
+    ax.axvline(-10, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
 
     ax = axes[1]
     rho_p1 = U_p1d_np[:, 0][np.isfinite(U_p1d_np[:, 0])]
     ax.hist(rho_p1, bins=80, density=True,
             alpha=0.6, color="tab:green", label="post-Phase-I")
     ax.set_xlabel("ρ"); ax.set_ylabel("density")
-    ax.set_title(f"Post-Phase-I marginal of ρ\nfrac(|ρ|<0.1)={frac_p1_str}")
-    ax.axvline(0, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
+    ax.set_title(f"Post-Phase-I marginal of ρ\nfrac(sp(ρ)<0.1)={frac_p1_str}")
+    ax.axvline(-10, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
 
     ax = axes[2]
     rho_finite = U_inf_np[:, 0][np.isfinite(U_inf_np[:, 0])]
     ax.hist(rho_finite, bins=80, density=True,
             alpha=0.6, color="tab:orange", label="final inferred")
     ax.set_xlabel("ρ"); ax.set_ylabel("density")
-    ax.set_title(f"Final marginal of ρ\nfrac(|ρ|<0.1)={frac_str}")
-    ax.axvline(0, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
+    ax.set_title(f"Final marginal of ρ\nfrac(sp(ρ)<0.1)={frac_str}")
+    ax.axvline(-10, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
 
     fig.suptitle(f"Marginal ρ distributions ({case_name})", fontsize=11)
     fig.tight_layout()
@@ -691,16 +694,16 @@ def run_training():
                s=1, alpha=0.3, c="tab:green", label="true U (latent)")
     ax.set_xlabel("ρ"); ax.set_ylabel("log σ")
     ax.set_title(f"True latent U ({n_diag} observations)")
-    ax.axvline(0, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
-    ax.set_xlim(-1, 3.5); ax.set_ylim(-3, 3)
+    ax.axvline(-10, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
+    ax.set_xlim(-12, 4); ax.set_ylim(-3, 3)
 
     ax = axes[1]
     ax.scatter(U_inf_np[:, 0], U_inf_np[:, 1],
                s=1, alpha=0.3, c="tab:orange", label="inferred U")
     ax.set_xlabel("ρ"); ax.set_ylabel("log σ")
     ax.set_title(f"Inferred U ({n_diag} observations)")
-    ax.axvline(0, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
-    ax.set_xlim(-1, 3.5); ax.set_ylim(-3, 3)
+    ax.axvline(-10, color="red", lw=0.8, ls="--"); ax.legend(fontsize=8)
+    ax.set_xlim(-12, 4); ax.set_ylim(-3, 3)
 
     fig.suptitle(f"True latent vs inferred latent ({case_name})", fontsize=11)
     fig.tight_layout()
@@ -709,29 +712,29 @@ def run_training():
     plt.close(fig)
     results["true_vs_inferred_U.png"] = buf.getvalue()
 
-    # ---- Plot: Survival function comparison ----
-    rho_true_abs = np.abs(ref_samples[:, 0])
-    rho_p1_abs = np.abs(rho_p1)
-    rho_inf_abs = np.abs(rho_finite)
+    # ---- Plot: Survival function of softplus(rho) ----
+    sp_true = np.log1p(np.exp(ref_samples[:, 0]))
+    sp_p1 = np.log1p(np.exp(rho_p1))
+    sp_inf = np.log1p(np.exp(rho_finite))
 
-    rho_true_sorted = np.sort(rho_true_abs)
-    surv_true = 1.0 - np.arange(1, len(rho_true_sorted) + 1) / len(rho_true_sorted)
-    rho_p1_sorted = np.sort(rho_p1_abs)
-    surv_p1 = 1.0 - np.arange(1, len(rho_p1_sorted) + 1) / len(rho_p1_sorted)
-    rho_inf_sorted = np.sort(rho_inf_abs)
-    surv_inf = 1.0 - np.arange(1, len(rho_inf_sorted) + 1) / len(rho_inf_sorted)
+    sp_true_sorted = np.sort(sp_true)
+    surv_true = 1.0 - np.arange(1, len(sp_true_sorted) + 1) / len(sp_true_sorted)
+    sp_p1_sorted = np.sort(sp_p1)
+    surv_p1 = 1.0 - np.arange(1, len(sp_p1_sorted) + 1) / len(sp_p1_sorted)
+    sp_inf_sorted = np.sort(sp_inf)
+    surv_inf = 1.0 - np.arange(1, len(sp_inf_sorted) + 1) / len(sp_inf_sorted)
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(rho_true_sorted, surv_true,
+    ax.plot(sp_true_sorted, surv_true,
             label="true π", color="tab:blue", lw=1.5)
-    ax.plot(rho_p1_sorted, surv_p1,
+    ax.plot(sp_p1_sorted, surv_p1,
             label="post-Phase-I", color="tab:green", lw=1.5, ls="--")
-    ax.plot(rho_inf_sorted, surv_inf,
+    ax.plot(sp_inf_sorted, surv_inf,
             label="final (post-Phase-II)", color="tab:orange", lw=1.5)
     ax.set_yscale("log")
-    ax.set_xlabel("|ρ|"); ax.set_ylabel("P(|ρ| > t)")
+    ax.set_xlabel("softplus(ρ)"); ax.set_ylabel("P(softplus(ρ) > t)")
     ax.set_title(
-        f"Empirical survival of |ρ|  ({case_name})\n"
+        f"Empirical survival of softplus(ρ)  ({case_name})\n"
         f"null_prob={null_prob_true}, post-P1={frac_p1_str}, final={frac_str}")
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
