@@ -267,7 +267,7 @@ def run_training():
     # ================================================================
     L = 3
     T = 20
-    null_prob_true = 0.8       # same as run_modal.py
+    null_prob_true = 0.8       # same as run_modal.py; tests Phase II stability
     n_phase1_steps = 10_000    # Phase I on TRUE pi (oracle warm-start)
     n_phase2_steps = 150_000   # Phase II bootstrap (same as run_modal.py)
     n_init_samples = 256

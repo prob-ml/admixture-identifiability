@@ -269,7 +269,7 @@ def run_training():
     # ================================================================
     L = 3
     T = 20
-    null_prob_true = 0.95      # match the oracle setting
+    null_prob_true = 0.95      # match run_modal_oracle.py's easier setting
     null_prob_init = 0.5
     n_phase1_steps = 10_000
     n_phase2_steps = 150_000
