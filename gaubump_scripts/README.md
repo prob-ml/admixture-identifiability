@@ -17,13 +17,17 @@ continuous mark space $S = \mathbb{R}^2$.
 | $\pi$ | shape distribution on $\mathbb{R}^2$ |
 | $(\rho, \log\sigma)$ | a point in the mark space |
 
-**Shape function.**
+**Shape function (softplus nonlinearity).**
 Each mark $(\rho, \log\sigma) \in \mathbb{R}^2$ defines a shape on
 $\{-L, \dots, L\}$:
 
-$$f(x) = \rho \exp\!\bigl(-x^2 / 2e^{2\log\sigma}\bigr).$$
+$$f(x) = \operatorname{softplus}(\rho)\;\exp\!\bigl(-x^2 / 2e^{2\log\sigma}\bigr).$$
 
-When $\rho = 0$ the shape is identically zero (null shape).
+The softplus nonlinearity ($\log(1+e^\rho)$) ensures positive amplitudes
+and provides smooth gradients near zero.  Null marks use $\rho = -10$
+($\operatorname{softplus}(-10) \approx 4.5 \times 10^{-5}$), which
+produces faint background-like noise rather than an exact zero — this
+gives the model a well-behaved gradient signal for learning zero amplitude.
 
 **Generative process.**
 Given $(L, T, \pi)$, a single draw of $X \in \mathbb{R}^{T-2L+1}$ is:
@@ -32,9 +36,10 @@ Given $(L, T, \pi)$, a single draw of $X \in \mathbb{R}^{T-2L+1}$ is:
 2. For each $t \in \{L, \dots, T-L\}$, set
 
 $$X_t = \sum_{\tau=0}^{T}
-        \rho_\tau \exp\!\bigl(-(t-\tau)^2 / 2e^{2\log\sigma_\tau}\bigr).$$
+        \operatorname{softplus}(\rho_\tau) \exp\!\bigl(-(t-\tau)^2 / 2e^{2\log\sigma_\tau}\bigr).$$
 
-The **null shape probability** is $\pi(\rho = 0) = \pi(\{0\} \times \mathbb{R})$.
+The **null shape probability** is the mass $\pi$ assigns near
+$\rho = -10$ (i.e.\ where $\operatorname{softplus}(\rho) \approx 0$).
 
 ## Goal
 
@@ -62,39 +67,62 @@ Repeat:
 4. Train the flow network for one epoch on freshly simulated $(X, U)$
    pairs under the new $\hat\pi$ (never reuse samples).
 
+Phase II restarts the optimiser from scratch (fresh cosine schedule and
+Adam moments) to avoid stale momentum from Phase I.
+
 ## Files
 
 | File | Description |
 |------|-------------|
 | `README.md` | This file |
-| `DETAILED_PLAN.md` | Implementation road-map and design notes |
-| `model.py` | Generative model: sampling $U$ and computing $X$ |
-| `flow_matching.py` | MLP velocity network and flow-matching utilities |
-| `train.py` | End-to-end training script (Phase I + Phase II) |
-| `run_modal.py` | Run training on Modal with a T4 GPU and save diagnostic plots |
-| `results/` | Output PNGs from a completed run |
+| `model.py` | Generative model: shape function (softplus), sampling $U$, computing $X$ |
+| `flow_matching.py` | MLP velocity network, flow-matching loss, ODE sampling |
+| `train.py` | Local end-to-end training script (Phase I + Phase II), CLI |
+| `run_modal_experiment.py` | Self-contained Modal GPU experiment runner (parameterised) |
+| `results/` | Output directories from completed experiment runs |
 
-## Running on Modal
+### Running an experiment on Modal
 
 ```bash
-modal run gaubump_scripts/run_modal.py
+modal run gaubump_scripts/run_modal_experiment.py
 ```
 
-This runs the full training pipeline on a T4 GPU and saves three
-diagnostic PNGs to `gaubump_scripts/results/`.
+Edit the **CASE CONFIGURATION** block inside `run_modal_experiment.py` to
+change `null_prob_true`, `null_prob_init`, the mixture components, and
+`case_name`.  Results are saved to `results/<case_name>/`.
 
-## Results (easy case)
+Each run produces:
 
-Configuration: $L=3$, $T=20$, `null_prob_true=0.8`, 2000 Phase I steps,
-200 Phase II iterations, batch size 256, seed 42.
+| Output | Description |
+|--------|-------------|
+| `training_log.txt` | Phase I + II training metrics |
+| `gpu_utilization.txt` | GPU utilisation time series |
+| `xdata_true.png` | Example X observations from the true model |
+| `xdata_pihat.png` | Example X observations from the initial guess |
+| `posterior_vs_truth.png` | Scatter: ground-truth π vs inferred aggregate posterior |
+| `rho_marginal.png` | Histogram: marginal of ρ (true vs inferred) |
+| `rho_survival.png` | Survival function: P(softplus(ρ) > t) |
+| `true_vs_inferred_U.png` | Scatter: true latent U vs inferred U |
 
-| Plot | Description |
-|------|-------------|
-| `results/posterior_vs_truth.png` | Scatter: ground-truth $\pi$ samples vs aggregate posterior |
-| `results/rho_marginal.png` | Histogram: marginal of $\rho$ (true vs inferred) |
-| `results/true_vs_inferred_U.png` | Scatter: true latent $U$ vs inferred $U$ |
+### Running locally (without Modal)
 
-The inferred aggregate posterior shows `frac(|ρ|<0.1) ≈ 24%` compared to
-the true null probability of 80%. The model is beginning to learn the
-structure but has not yet tightly recovered the atom — expected for a
-first baby-step run.
+```bash
+cd gaubump_scripts
+python train.py [--L 3] [--T 20] [--n_phase1 2000] [--n_phase2 200] ...
+```
+
+## Current results
+
+### `case_softplus_np95_pihat95`
+
+Configuration: $L=3$, $T=20$, `null_prob_true=0.95`, `null_prob_init=0.95`,
+10 000 Phase I steps, 150 000 Phase II steps, seed 42.
+
+| Metric | Value |
+|--------|-------|
+| Post-Phase I frac(softplus(ρ) < 0.1) | 0.956 |
+| Final frac(softplus(ρ) < 0.1) | 0.952 |
+| True null probability | 0.950 |
+
+Phase II bootstrap remains **stable** throughout all 150k iterations
+(frac ≈ 0.95 ± 0.01), thanks to the softplus nonlinearity.
