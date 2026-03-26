@@ -278,6 +278,17 @@ def run_training():
         new_model = eqx.apply_updates(model, updates)
         return new_model, new_opt_state, loss
 
+    @eqx.filter_jit
+    def eval_flow_loss(model, U, X, key):
+        """Evaluate flow matching loss on a batch WITHOUT gradients."""
+        batch = U.shape[0]
+        U_flat = U.reshape(batch, -1)
+        keys = jax.random.split(key, batch)
+        losses = jax.vmap(
+            lambda u, x, k: flow_matching_loss_single(model, u, x, k)
+        )(U_flat, X, keys)
+        return jnp.mean(losses)
+
     # ================================================================
     # ██  CASE CONFIGURATION  ██
     # Change these for each case study.
@@ -371,6 +382,29 @@ def run_training():
 
     dt_warmup = time_mod.time() - t_warmup
     log(f"JIT warmup complete in {dt_warmup:.1f}s")
+
+    # ================================================================
+    # Fixed evaluation batch (ground-truth data for loss tracking)
+    # ================================================================
+    key, k_eval_data, k_eval_warm = jax.random.split(key, 3)
+    n_eval = 512
+    X_eval_gt, U_eval_gt = sample_XU_mixture(
+        k_eval_data, np_true, w_true, m_true, s_true, L, T, n_eval)
+    eval_key_fixed = jax.random.PRNGKey(999)  # fixed for reproducibility
+
+    # JIT-warm the eval function
+    _eval_loss = eval_flow_loss(model, U_eval_gt, X_eval_gt, eval_key_fixed)
+    jax.block_until_ready(_eval_loss)
+    log(f"Eval function warmed up (initial GT loss = {float(_eval_loss):.4f})")
+
+    # Loss tracking lists
+    p1_steps_loss: list[int] = []
+    p1_train_losses: list[float] = []
+    p1_gt_losses: list[float] = []
+    p2_steps_loss: list[int] = []
+    p2_gt_losses: list[float] = []
+    eval_interval_p1 = 200
+    eval_interval_p2 = 2500
 
     # ================================================================
     # Generate X-data diagnostic plots BEFORE training
@@ -478,6 +512,15 @@ def run_training():
             model, opt_state, optimizer_p1, U, X, k_step)
         if step % log_interval_p1 == 0 or step == n_phase1_steps - 1:
             log(f"  step {step:5d}  loss={float(loss):.6f}")
+        if step % eval_interval_p1 == 0 or step == n_phase1_steps - 1:
+            gt_loss = float(eval_flow_loss(
+                model, U_eval_gt, X_eval_gt, eval_key_fixed))
+            p1_steps_loss.append(step)
+            p1_train_losses.append(float(loss))
+            p1_gt_losses.append(gt_loss)
+            if step % log_interval_p1 != 0:  # avoid double-logging
+                log(f"  step {step:5d}  loss={float(loss):.6f}"
+                    f"  gt_loss={gt_loss:.6f}")
 
     jax.block_until_ready(loss)
     dt_p1 = time_mod.time() - t_phase1
@@ -560,6 +603,14 @@ def run_training():
                 f"frac(sp(rho)<0.1)={frac_null:.3f}  "
                 f"lr={current_lr:.6f}"
             )
+
+        if step % eval_interval_p2 == 0 or step == n_phase2_steps - 1:
+            gt_loss = float(eval_flow_loss(
+                model, U_eval_gt, X_eval_gt, eval_key_fixed))
+            p2_steps_loss.append(step)
+            p2_gt_losses.append(gt_loss)
+            if not should_log_p2(step):
+                log(f"  iter {step:6d}  gt_loss={gt_loss:.6f}")
 
     jax.block_until_ready(loss)
     dt_p2 = time_mod.time() - t_phase2
@@ -744,6 +795,39 @@ def run_training():
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
     results["rho_survival.png"] = buf.getvalue()
+
+    # ---- Plot: Loss curves ----
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Phase I: training loss (pihat data) + GT eval loss
+    ax1.plot(p1_steps_loss, p1_train_losses,
+             label="Training loss (π̂ data)", color="tab:blue", alpha=0.7)
+    ax1.plot(p1_steps_loss, p1_gt_losses,
+             label="GT eval loss (true π data)", color="tab:orange", lw=2)
+    ax1.set_xlabel("Phase I step")
+    ax1.set_ylabel("Flow matching loss")
+    ax1.set_title("Phase I: Warm-up on π̂")
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # Phase II: GT eval loss only
+    ax2.plot(p2_steps_loss, p2_gt_losses,
+             label="GT eval loss (true π data)", color="tab:orange", lw=2)
+    ax2.set_xlabel("Phase II step")
+    ax2.set_ylabel("Flow matching loss")
+    ax2.set_title("Phase II: Bootstrap refinement (GT eval)")
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        f"Flow matching loss curves ({case_name})\n"
+        f"Eval on {n_eval} fixed ground-truth (X, U) pairs",
+        fontsize=12)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    plt.close(fig)
+    results["loss_curves.png"] = buf.getvalue()
 
     # ---- Training log ----
     training_log = "\n".join(log_lines) + "\n"
