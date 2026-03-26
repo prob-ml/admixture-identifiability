@@ -1,0 +1,397 @@
+import { type CSSProperties } from "react";
+
+/* ------------------------------------------------------------------ */
+/*  Paths to result images (served from public/)                       */
+/* ------------------------------------------------------------------ */
+const CASE = "case_softplus_np95_pihat95";
+const img = (name: string) => `/results/${CASE}/${name}`;
+
+/* ------------------------------------------------------------------ */
+/*  Reusable style helpers                                             */
+/* ------------------------------------------------------------------ */
+const container: CSSProperties = {
+  maxWidth: 860,
+  margin: "0 auto",
+  padding: "2rem 1.5rem 4rem",
+};
+
+const section: CSSProperties = {
+  marginTop: "3rem",
+};
+
+const h1Style: CSSProperties = {
+  fontSize: "2.2rem",
+  fontWeight: 700,
+  lineHeight: 1.2,
+  marginBottom: "0.5rem",
+};
+
+const h2Style: CSSProperties = {
+  fontSize: "1.5rem",
+  fontWeight: 600,
+  marginBottom: "0.75rem",
+  borderBottom: "2px solid var(--accent)",
+  paddingBottom: "0.25rem",
+  display: "inline-block",
+};
+
+const h3Style: CSSProperties = {
+  fontSize: "1.15rem",
+  fontWeight: 600,
+  marginTop: "1.5rem",
+  marginBottom: "0.5rem",
+};
+
+const pStyle: CSSProperties = {
+  marginBottom: "1rem",
+};
+
+const figStyle: CSSProperties = {
+  margin: "1.5rem 0",
+  textAlign: "center",
+};
+
+const imgStyle: CSSProperties = {
+  maxWidth: "100%",
+  borderRadius: 6,
+  border: "1px solid var(--border)",
+  boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+};
+
+const captionStyle: CSSProperties = {
+  fontSize: "0.85rem",
+  color: "var(--muted)",
+  marginTop: "0.5rem",
+};
+
+const tableWrap: CSSProperties = {
+  overflowX: "auto",
+  margin: "1rem 0",
+};
+
+const tableStyle: CSSProperties = {
+  borderCollapse: "collapse",
+  width: "100%",
+  fontSize: "0.95rem",
+};
+
+const thStyle: CSSProperties = {
+  textAlign: "left",
+  padding: "0.5rem 0.75rem",
+  borderBottom: "2px solid var(--border)",
+  fontWeight: 600,
+};
+
+const tdStyle: CSSProperties = {
+  padding: "0.5rem 0.75rem",
+  borderBottom: "1px solid var(--border)",
+};
+
+const eqBlock: CSSProperties = {
+  background: "var(--code-bg)",
+  borderRadius: 6,
+  padding: "0.75rem 1rem",
+  fontFamily: "var(--font-mono)",
+  fontSize: "0.9rem",
+  overflowX: "auto",
+  margin: "1rem 0",
+};
+
+const gridTwo: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: "1.5rem",
+};
+
+/* ------------------------------------------------------------------ */
+/*  Components                                                         */
+/* ------------------------------------------------------------------ */
+
+function Figure({
+  src,
+  alt,
+  caption,
+}: {
+  src: string;
+  alt: string;
+  caption: string;
+}) {
+  return (
+    <figure style={figStyle}>
+      <img src={src} alt={alt} style={imgStyle} />
+      <figcaption style={captionStyle}>{caption}</figcaption>
+    </figure>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  App                                                                */
+/* ------------------------------------------------------------------ */
+export default function App() {
+  return (
+    <div style={container}>
+      {/* ---- Header ---- */}
+      <header>
+        <h1 style={h1Style}>Admixture Identifiability</h1>
+        <p style={{ ...pStyle, fontSize: "1.1rem", color: "var(--muted)" }}>
+          Recovering a latent shape distribution from noisy additive
+          observations using rectified flow matching.
+        </p>
+      </header>
+
+      {/* ---- The Setup ---- */}
+      <section style={section}>
+        <h2 style={h2Style}>The Setup: Gaussian Bump Model</h2>
+
+        <p style={pStyle}>
+          We observe a one-dimensional signal <code>X</code> that is the sum of
+          many shifted "bumps." Each bump is a Gaussian-shaped pulse whose
+          amplitude and width are drawn from an unknown distribution{" "}
+          <strong>π</strong>. A large fraction of the bumps are{" "}
+          <em>null</em> — effectively zero amplitude — so the signal is sparse.
+        </p>
+
+        <h3 style={h3Style}>Shape function (softplus nonlinearity)</h3>
+        <p style={pStyle}>
+          Each latent mark <code>(ρ, log σ)</code> ∈ ℝ² defines a shape on the
+          integer grid &#123;−L, …, L&#125;:
+        </p>
+        <div style={eqBlock}>
+          f(x) = softplus(ρ) · exp(−x² / (2 · exp(2·log σ)))
+        </div>
+        <p style={pStyle}>
+          The <code>softplus</code> nonlinearity (log(1 + eᵖ)) ensures positive
+          amplitudes and smooth gradients near zero. Null marks use{" "}
+          <code>ρ = −10</code> (softplus(−10) ≈ 4.5 × 10⁻⁵), producing faint
+          background noise rather than exact zero — this gives well-behaved
+          gradient signal for learning zero amplitude.
+        </p>
+
+        <h3 style={h3Style}>Generative process</h3>
+        <p style={pStyle}>
+          Given parameters (L, T, π), a single observation X ∈ ℝᵀ⁻²ᴸ⁺¹ is
+          generated by:
+        </p>
+        <ol style={{ ...pStyle, paddingLeft: "1.5rem" }}>
+          <li>
+            For each position t ∈ &#123;0, …, T&#125;, sample Uₜ = (ρₜ, log
+            σₜ) ∼ π.
+          </li>
+          <li>
+            For each visible position t ∈ &#123;L, …, T−L&#125;, compute Xₜ =
+            Σ softplus(ρ_τ) · exp(−(t−τ)² / (2·exp(2·log σ_τ))).
+          </li>
+        </ol>
+
+        <h3 style={h3Style}>Goal</h3>
+        <p style={pStyle}>
+          <strong>Estimate π from samples of X alone.</strong> The latent marks
+          U are never observed. In particular, we want to recover the null
+          probability — the fraction of marks that are effectively zero.
+        </p>
+      </section>
+
+      {/* ---- What We Do ---- */}
+      <section style={section}>
+        <h2 style={h2Style}>What We Do: Rectified Flow Matching</h2>
+
+        <p style={pStyle}>
+          We train a conditional <strong>rectified flow matching</strong> network
+          that learns to map Gaussian noise to{" "}
+          <code>U ∈ ℝ⁽ᵀ⁺¹⁾ˣ²</code> given an observation X. Training proceeds
+          in two phases:
+        </p>
+
+        <h3 style={h3Style}>Phase I — Warm-up</h3>
+        <p style={pStyle}>
+          Train the flow network on (X, U) pairs sampled from an initial guess
+          π̂. Each gradient step uses <em>freshly simulated</em> data — no fixed
+          dataset, no repeated samples.
+        </p>
+
+        <h3 style={h3Style}>Phase II — Iterative refinement (bootstrap)</h3>
+        <ol style={{ ...pStyle, paddingLeft: "1.5rem" }}>
+          <li>
+            Draw X samples from the <strong>true</strong> model (L, T, π).
+          </li>
+          <li>
+            Push each X through the current flow to infer U (stop-gradient).
+          </li>
+          <li>Define π̂ as the empirical distribution over inferred U.</li>
+          <li>
+            Train the flow on fresh (X, U) pairs drawn from this updated π̂.
+          </li>
+        </ol>
+        <p style={pStyle}>
+          Phase II restarts the optimiser from scratch — fresh cosine learning
+          rate schedule and fresh Adam moments — to avoid stale momentum from
+          Phase I. Crucially, <strong>Phase II never sees ground-truth U</strong>
+          . Only true X observations are used.
+        </p>
+
+        <h3 style={h3Style}>Key insight: softplus stabilises the bootstrap</h3>
+        <p style={pStyle}>
+          Earlier experiments using a linear amplitude (ρ · exp(…)) suffered
+          from Phase II instability: the inferred null fraction would degrade
+          from ~0.86 to ~0.36 after 150k iterations. Switching to{" "}
+          <code>softplus(ρ)</code> with null marks at ρ = −10 completely
+          resolves this — the null fraction stays locked at ~0.95 throughout.
+        </p>
+      </section>
+
+      {/* ---- What We Find ---- */}
+      <section style={section}>
+        <h2 style={h2Style}>What We Find</h2>
+
+        <h3 style={h3Style}>
+          Case study: <code>case_softplus_np95_pihat95</code>
+        </h3>
+
+        <div style={tableWrap}>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Parameter</th>
+                <th style={thStyle}>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={tdStyle}>Support window L</td>
+                <td style={tdStyle}>3</td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>Visible window T</td>
+                <td style={tdStyle}>20</td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>True null probability</td>
+                <td style={tdStyle}>0.95</td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>Initial guess null probability</td>
+                <td style={tdStyle}>0.95</td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>Phase I steps</td>
+                <td style={tdStyle}>10,000</td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>Phase II steps</td>
+                <td style={tdStyle}>150,000</td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>Seed</td>
+                <td style={tdStyle}>42</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style={h3Style}>Key metrics</h3>
+        <div style={tableWrap}>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Metric</th>
+                <th style={thStyle}>Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={tdStyle}>Post-Phase I frac(softplus(ρ) &lt; 0.1)</td>
+                <td style={tdStyle}>
+                  <strong>0.956</strong>
+                </td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>
+                  Final frac(softplus(ρ) &lt; 0.1) (after 150k Phase II steps)
+                </td>
+                <td style={tdStyle}>
+                  <strong>0.952</strong>
+                </td>
+              </tr>
+              <tr>
+                <td style={tdStyle}>True null probability</td>
+                <td style={tdStyle}>0.950</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p style={pStyle}>
+          Phase II bootstrap remains <strong>stable</strong> throughout all 150k
+          iterations (frac ≈ 0.95 ± 0.01), confirming that the softplus
+          nonlinearity eliminates the bias amplification that plagued the linear
+          parameterisation.
+        </p>
+      </section>
+
+      {/* ---- Diagnostic Plots ---- */}
+      <section style={section}>
+        <h2 style={h2Style}>Diagnostic Plots</h2>
+
+        <h3 style={h3Style}>Observation data</h3>
+        <div style={gridTwo}>
+          <Figure
+            src={img("xdata_true.png")}
+            alt="True X observations"
+            caption="X samples from the true model (π with 95% null marks)"
+          />
+          <Figure
+            src={img("xdata_pihat.png")}
+            alt="Initial guess X observations"
+            caption="X samples from the initial guess π̂"
+          />
+        </div>
+
+        <h3 style={h3Style}>Posterior recovery</h3>
+        <Figure
+          src={img("posterior_vs_truth.png")}
+          alt="Posterior vs truth scatter"
+          caption="Ground-truth π samples vs aggregate posterior inferred by the flow network"
+        />
+
+        <h3 style={h3Style}>ρ marginal distribution</h3>
+        <Figure
+          src={img("rho_marginal.png")}
+          alt="Rho marginal histogram"
+          caption="Marginal histogram of ρ: true distribution vs flow-inferred posterior"
+        />
+
+        <h3 style={h3Style}>ρ survival function</h3>
+        <Figure
+          src={img("rho_survival.png")}
+          alt="Rho survival function"
+          caption="Survival function P(softplus(ρ) > t): true vs inferred"
+        />
+
+        <h3 style={h3Style}>Latent U comparison</h3>
+        <Figure
+          src={img("true_vs_inferred_U.png")}
+          alt="True vs inferred U"
+          caption="True latent U vs inferred U for a batch of observations"
+        />
+      </section>
+
+      {/* ---- Footer ---- */}
+      <footer
+        style={{
+          marginTop: "4rem",
+          padding: "1.5rem 0",
+          borderTop: "1px solid var(--border)",
+          fontSize: "0.85rem",
+          color: "var(--muted)",
+          textAlign: "center",
+        }}
+      >
+        <p>
+          Source:{" "}
+          <a href="https://github.com/prob-ml/admixture-identifiability">
+            prob-ml/admixture-identifiability
+          </a>
+        </p>
+      </footer>
+    </div>
+  );
+}
