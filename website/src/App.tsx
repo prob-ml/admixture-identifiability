@@ -301,7 +301,7 @@ export default function App() {
               <tr>
                 <td style={tdStyle}>Post-Phase I frac(softplus(ρ) &lt; 0.1)</td>
                 <td style={tdStyle}>
-                  <strong>0.956</strong>
+                  <strong>0.954</strong>
                 </td>
               </tr>
               <tr>
@@ -309,7 +309,7 @@ export default function App() {
                   Final frac(softplus(ρ) &lt; 0.1) (after 150k Phase II steps)
                 </td>
                 <td style={tdStyle}>
-                  <strong>0.952</strong>
+                  <strong>0.954</strong>
                 </td>
               </tr>
               <tr>
@@ -325,6 +325,41 @@ export default function App() {
           nonlinearity eliminates the bias amplification that plagued the linear
           parameterisation.
         </p>
+      </section>
+
+      {/* ---- Training Loss Curves ---- */}
+      <section style={section}>
+        <h2 style={h2Style}>Training Loss Curves</h2>
+
+        <p style={pStyle}>
+          We evaluate the flow matching loss on a fixed batch of 512
+          ground-truth <code>(X, U)</code> pairs throughout training. This
+          "GT eval loss" measures how well the flow network can predict the
+          velocity field when given <em>real</em> latent marks — the true test
+          of whether the model is learning the correct posterior.
+        </p>
+
+        <p style={pStyle}>
+          In <strong>Phase I</strong>, we also plot the training loss computed on
+          synthetic data drawn from the initial guess π̂. Both losses decrease
+          together, confirming that training on the proxy distribution also
+          improves performance on real data.
+        </p>
+
+        <p style={pStyle}>
+          In <strong>Phase II</strong>, we show only the GT eval loss. The
+          training distribution shifts at each bootstrap iteration (it is
+          defined by the model's own inferred U), so the training loss is not
+          directly comparable across steps. The GT eval loss initially rises as
+          the bootstrap distribution changes, then steadily decreases as the
+          model refines its posterior estimate.
+        </p>
+
+        <Figure
+          src={img("loss_curves.png")}
+          alt="Flow matching loss curves"
+          caption="Flow matching loss evaluated on 512 fixed ground-truth (X, U) pairs. Left: Phase I (warm-up on π̂) shows both training and GT eval loss. Right: Phase II (bootstrap) shows GT eval loss only."
+        />
       </section>
 
       {/* ---- Diagnostic Plots ---- */}
