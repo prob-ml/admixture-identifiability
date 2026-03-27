@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """End-to-end training script for the Gaussian-bump flow matching model.
 
+Uses the binary-V two-model architecture:
+  1. V-classifier: predicts null/active gate V from X.
+  2. U-flow: flow matching conditioned on (X, V), masked to active positions.
+
 Usage:
     python train.py [--L 3] [--T 20] [--n_phase1 2000] [--n_phase2 200] ...
 
@@ -21,14 +25,17 @@ from model import (
     sample_XU,
     sample_pi,
     stack_mixture_params,
-    sample_XU_mixture,
-    sample_XU_empirical,
+    sample_XVU_mixture,
+    sample_XVU_empirical,
 )
 from flow_matching import (
+    VClassifierMLP,
     VelocityMLP,
     make_optimizer,
     update_step,
+    update_step_v,
     sample_flow_batch,
+    eval_v_accuracy,
 )
 
 
@@ -37,7 +44,7 @@ from flow_matching import (
 # ---------------------------------------------------------------------------
 
 def make_default_pi_true(null_prob: float = 0.6) -> ShapeDistribution:
-    """A mixture: atom at (0, ·) with weight *null_prob*, plus two Gaussians."""
+    """A mixture: null with weight *null_prob*, plus two Gaussians."""
     return ShapeDistribution(
         null_prob=null_prob,
         components=[
@@ -99,22 +106,33 @@ def train(
     np_hat, w_hat, m_hat, s_hat = stack_mixture_params(pihat)
     np_true, w_true, m_true, s_true = stack_mixture_params(pi_true)
 
-    # Initialise network and optimiser
-    key, model_key = jax.random.split(key)
+    # Initialise networks and optimisers
+    key, model_key, vclass_key = jax.random.split(key, 3)
     model = VelocityMLP(T=T, L=L, hidden_dims=hidden_dims, key=model_key)
+    v_model = VClassifierMLP(T=T, L=L, hidden_dims=hidden_dims, key=vclass_key)
     optimizer = make_optimizer(lr)
     opt_state = optimizer.init(model)
+    v_optimizer = make_optimizer(lr)
+    v_opt_state = v_optimizer.init(v_model)
 
     # ------------------------------------------------------------------
     # JIT warmup — compile all kernels before the training loops
     # ------------------------------------------------------------------
     print("=== JIT warmup ===")
     key, k1, k2, k3, k4, k5 = jax.random.split(key, 6)
-    _X1, _U1 = sample_XU_mixture(k1, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
-    _X2, _ = sample_XU_mixture(k2, np_true, w_true, m_true, s_true, L, T, n_source)
-    _, _, _loss = update_step(model, opt_state, optimizer, _U1, _X1, k3)
-    _Uinf = sample_flow_batch(model, _X2, k4)
-    _X3, _ = sample_XU_empirical(k5, _Uinf.reshape(-1, 2), L, T, n_eachstep_samples)
+    _X1, _V1, _U1 = sample_XVU_mixture(
+        k1, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
+    _X2, _V2, _ = sample_XVU_mixture(
+        k2, np_true, w_true, m_true, s_true, L, T, n_source)
+    _, _, _loss = update_step(model, opt_state, optimizer, _U1, _X1, _V1, k3)
+    v_model, v_opt_state, _vloss = update_step_v(
+        v_model, v_opt_state, v_optimizer, _X1, _V1)
+    # Predict V, then sample U conditioned on it
+    _V_logits = jax.vmap(v_model)(_X2)
+    _V_pred = (_V_logits > 0.0).astype(jnp.float32)
+    _Uinf = sample_flow_batch(model, _X2, _V_pred, k4)
+    _X3, _V3, _U3 = sample_XVU_empirical(
+        k5, _V_pred.reshape(-1), _Uinf.reshape(-1, 2), L, T, n_eachstep_samples)
     jax.block_until_ready((_X1, _X2, _X3, _loss, _Uinf))
     print("  warmup complete")
 
@@ -124,11 +142,15 @@ def train(
     print(f"=== Phase I ({n_phase1_steps} steps) ===")
     for step in range(n_phase1_steps):
         key, k_data, k_step = jax.random.split(key, 3)
-        X, U = sample_XU_mixture(k_data, np_hat, w_hat, m_hat, s_hat,
-                                 L, T, n_init_samples)
-        model, opt_state, loss = update_step(model, opt_state, optimizer, U, X, k_step)
+        X, V, U = sample_XVU_mixture(
+            k_data, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
+        model, opt_state, loss = update_step(
+            model, opt_state, optimizer, U, X, V, k_step)
+        v_model, v_opt_state, v_loss = update_step_v(
+            v_model, v_opt_state, v_optimizer, X, V)
         if step % max(1, n_phase1_steps // 20) == 0 or step == n_phase1_steps - 1:
-            print(f"  step {step:5d}  loss={float(loss):.6f}")
+            print(f"  step {step:5d}  u_loss={float(loss):.6f}"
+                  f"  v_loss={float(v_loss):.6f}")
 
     # ------------------------------------------------------------------
     # Phase II — iterative refinement
@@ -138,31 +160,39 @@ def train(
         key, k_true, k_infer, k_data, k_step = jax.random.split(key, 5)
 
         # 1. Draw X from the *true* model (JIT-compiled)
-        X_true, _ = sample_XU_mixture(k_true, np_true, w_true, m_true, s_true,
-                                      L, T, n_source)
+        X_true, V_true_unused, _ = sample_XVU_mixture(
+            k_true, np_true, w_true, m_true, s_true, L, T, n_source)
 
-        # 2. Infer U with the current flow model (stop-gradient)
+        # 2. Predict V with classifier
+        V_logits = jax.vmap(v_model)(X_true)
+        V_pred = (V_logits > 0.0).astype(jnp.float32)
+
+        # 3. Infer U with the current flow model (stop-gradient)
         U_inferred = jax.lax.stop_gradient(
-            sample_flow_batch(model, X_true, k_infer)
+            sample_flow_batch(model, X_true, V_pred, k_infer)
         )  # (n_source, T+1, 2)
 
-        # Replace any remaining NaN/Inf with null marks (rho=-10, logsigma=0)
-        null_mark = jnp.array([-10.0, 0.0])
+        # Replace any remaining NaN/Inf with zero
         U_inferred = jnp.where(
-            jnp.isfinite(U_inferred), U_inferred, null_mark)
+            jnp.isfinite(U_inferred), U_inferred, 0.0)
 
-        # 3. Train one step on fresh samples from empirical pihat (JIT-compiled)
-        U_flat = U_inferred.reshape(-1, 2)  # (n_source*(T+1), 2)
-        X_new, U_new = sample_XU_empirical(k_data, U_flat, L, T, n_eachstep_samples)
-        model, opt_state, loss = update_step(model, opt_state, optimizer, U_new, X_new, k_step)
+        # 4. Train one step on fresh samples from empirical distribution
+        V_flat = V_pred.reshape(-1)
+        U_flat = U_inferred.reshape(-1, 2)
+        X_new, V_new, U_new = sample_XVU_empirical(
+            k_data, V_flat, U_flat, L, T, n_eachstep_samples)
+        k_u, k_v = jax.random.split(k_step)
+        model, opt_state, loss = update_step(
+            model, opt_state, optimizer, U_new, X_new, V_new, k_u)
+        v_model, v_opt_state, v_loss = update_step_v(
+            v_model, v_opt_state, v_optimizer, X_new, V_new)
 
         if step % max(1, n_phase2_steps // 20) == 0 or step == n_phase2_steps - 1:
-            # Quick diagnostic: mean |rho| in inferred U
-            mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
-            frac_null = float(jnp.mean(jax.nn.softplus(U_flat[:, 0]) < 0.1))
+            frac_null = float(jnp.mean(V_flat < 0.5))
             print(
-                f"  iter {step:5d}  loss={float(loss):.6f}  "
-                f"mean|rho|={mean_rho:.3f}  frac(softplus(rho)<0.1)={frac_null:.3f}"
+                f"  iter {step:5d}  u_loss={float(loss):.6f}"
+                f"  v_loss={float(v_loss):.6f}"
+                f"  frac(V=0)={frac_null:.3f}"
             )
 
     # ------------------------------------------------------------------
@@ -171,23 +201,30 @@ def train(
     print("\n=== Final diagnostic inference ===")
     key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
     n_diag = max(n_source, 256)
-    X_diag, U_diag_true = sample_XU_mixture(
+    X_diag, V_diag_true, U_diag_true = sample_XVU_mixture(
         k_diag_true, np_true, w_true, m_true, s_true, L, T, n_diag)
+    V_diag_logits = jax.vmap(v_model)(X_diag)
+    V_diag_pred = (V_diag_logits > 0.0).astype(jnp.float32)
     U_diag_inferred = jax.lax.stop_gradient(
-        sample_flow_batch(model, X_diag, k_diag_infer)
+        sample_flow_batch(model, X_diag, V_diag_pred, k_diag_infer)
     )
-    U_diag_flat = U_diag_inferred.reshape(-1, 2)
-    frac_near_zero = float(jnp.mean(jax.nn.softplus(U_diag_flat[:, 0]) < 0.1))
-    print(f"  n_diag={n_diag}, total U pairs={U_diag_flat.shape[0]}")
-    print(f"  frac(softplus(rho)<0.1)={frac_near_zero:.3f}  (true null_prob={null_prob_true})")
+    V_diag_flat = V_diag_pred.reshape(-1)
+    frac_null = float(jnp.mean(V_diag_flat < 0.5))
+    v_acc = float(eval_v_accuracy(v_model, X_diag, V_diag_true))
+    print(f"  n_diag={n_diag}, total marks={V_diag_flat.shape[0]}")
+    print(f"  frac(V=0) inferred = {frac_null:.3f}  (true null_prob={null_prob_true})")
+    print(f"  V-classifier accuracy = {v_acc:.3f}")
 
     print("\nDone.")
     return {
         "model": model,
+        "v_model": v_model,
         "pi_true": pi_true,
-        "U_diag_inferred": U_diag_inferred,  # (n_diag, T+1, 2)
-        "U_diag_true": U_diag_true,          # (n_diag, T+1, 2)
-        "X_diag": X_diag,                    # (n_diag, T-2L+1)
+        "U_diag_inferred": U_diag_inferred,
+        "V_diag_pred": V_diag_pred,
+        "U_diag_true": U_diag_true,
+        "V_diag_true": V_diag_true,
+        "X_diag": X_diag,
         "null_prob_true": null_prob_true,
         "L": L,
         "T": T,
