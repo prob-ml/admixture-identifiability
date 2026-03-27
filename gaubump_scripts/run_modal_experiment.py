@@ -403,6 +403,7 @@ def run_training():
     p1_gt_losses: list[float] = []
     p2_steps_loss: list[int] = []
     p2_gt_losses: list[float] = []
+    p2_oracle_gt_losses: list[float] = []
     eval_interval_p1 = 200
     eval_interval_p2 = 2500
 
@@ -560,6 +561,19 @@ def run_training():
     )
     opt_state = optimizer_p2.init(model)
 
+    # --- Oracle model: fresh random init, same architecture, same schedule ---
+    key, oracle_model_key = jax.random.split(key)
+    oracle_model = VelocityMLP(T=T, L=L, hidden_dims=hidden_dims,
+                               key=oracle_model_key)
+    schedule_oracle = optax.cosine_decay_schedule(
+        init_value=lr, decay_steps=n_phase2_steps)
+    optimizer_oracle = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adam(learning_rate=schedule_oracle),
+    )
+    oracle_opt_state = optimizer_oracle.init(oracle_model)
+    log("  [Oracle] Fresh model initialised from scratch for comparison")
+
     t_phase2 = time_mod.time()
 
     def should_log_p2(step):
@@ -570,7 +584,8 @@ def run_training():
         return step % 7500 == 0 or step == n_phase2_steps - 1
 
     for step in range(n_phase2_steps):
-        key, k_true, k_infer, k_data, k_step = jax.random.split(key, 5)
+        key, k_true, k_infer, k_data, k_step, k_oracle = jax.random.split(
+            key, 6)
 
         # (a) Generate X from the true distribution (discard true U)
         X_true, _ = sample_XU_mixture(
@@ -589,9 +604,18 @@ def run_training():
         X_new, U_new = sample_XU_empirical(
             k_data, U_flat, L, T, n_eachstep_samples)
 
-        # (d) Gradient step
+        # (d) Gradient step (bootstrap model)
         model, opt_state, loss = update_step(
             model, opt_state, optimizer_p2, U_new, X_new, k_step)
+
+        # (e) Oracle model: train on fresh ground-truth (X, U) pairs
+        k_oracle_data, k_oracle_step = jax.random.split(k_oracle)
+        X_oracle, U_oracle = sample_XU_mixture(
+            k_oracle_data, np_true, w_true, m_true, s_true,
+            L, T, n_eachstep_samples)
+        oracle_model, oracle_opt_state, oracle_loss = update_step(
+            oracle_model, oracle_opt_state, optimizer_oracle,
+            U_oracle, X_oracle, k_oracle_step)
 
         if should_log_p2(step):
             mean_rho = float(jnp.mean(jnp.abs(U_flat[:, 0])))
@@ -607,10 +631,17 @@ def run_training():
         if step % eval_interval_p2 == 0 or step == n_phase2_steps - 1:
             gt_loss = float(eval_flow_loss(
                 model, U_eval_gt, X_eval_gt, eval_key_fixed))
+            oracle_gt_loss = float(eval_flow_loss(
+                oracle_model, U_eval_gt, X_eval_gt, eval_key_fixed))
             p2_steps_loss.append(step)
             p2_gt_losses.append(gt_loss)
+            p2_oracle_gt_losses.append(oracle_gt_loss)
             if not should_log_p2(step):
-                log(f"  iter {step:6d}  gt_loss={gt_loss:.6f}")
+                log(f"  iter {step:6d}  gt_loss={gt_loss:.6f}"
+                    f"  oracle_gt_loss={oracle_gt_loss:.6f}")
+            else:
+                log(f"  iter {step:6d}  [eval] bootstrap_gt={gt_loss:.6f}"
+                    f"  oracle_gt={oracle_gt_loss:.6f}")
 
     jax.block_until_ready(loss)
     dt_p2 = time_mod.time() - t_phase2
@@ -810,14 +841,25 @@ def run_training():
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
 
-    # Phase II: GT eval loss only
+    # Phase II: bootstrap GT eval loss + oracle GT eval loss
     ax2.plot(p2_steps_loss, p2_gt_losses,
-             label="GT eval loss (true π data)", color="tab:orange", lw=2)
+             label="Bootstrap model (GT eval)", color="tab:orange", lw=2)
+    ax2.plot(p2_steps_loss, p2_oracle_gt_losses,
+             label="Oracle model (GT eval)", color="tab:green", lw=2,
+             ls="--")
     ax2.set_xlabel("Phase II step")
     ax2.set_ylabel("Flow matching loss")
-    ax2.set_title("Phase II: Bootstrap refinement (GT eval)")
+    ax2.set_title("Phase II: Bootstrap vs Oracle (GT eval)")
     ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
+
+    # Smart y-limits for Phase II: clip to min of both maxes
+    # to avoid showing the very large early oracle losses
+    p2_boot = np.array(p2_gt_losses)
+    p2_orac = np.array(p2_oracle_gt_losses)
+    ylim_lo = min(p2_boot.min(), p2_orac.min()) * 0.95
+    ylim_hi = min(p2_boot.max(), p2_orac.max()) * 1.05
+    ax2.set_ylim(ylim_lo, ylim_hi)
 
     fig.suptitle(
         f"Flow matching loss curves ({case_name})\n"
