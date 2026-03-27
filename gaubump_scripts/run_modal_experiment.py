@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 """Parameterised experiment runner for Gaussian-bump flow matching case studies.
 
-Binary-V two-model architecture: a V-classifier MLP predicts which marks
-are active (V=1) vs null (V=0), and a velocity MLP learns a flow-matching
-model for the mark parameters U = (rho, logsigma) conditioned on V.
+Two-flow architecture: a V-flow MLP learns the joint distribution of the
+binary gate vector V via rectified flow matching (rounded to {0,1} at
+inference), and a U-flow MLP learns the mark parameters U = (rho, logsigma)
+via masked rectified flow matching conditioned on V.
 
 The shape function uses V directly:
     f(x) = V * rho * exp(-x^2 / (2 * exp(2*logsigma)))
 Null marks have V=0, rho=0, logsigma=0 — they contribute exactly zero
 to the observed signal.
 
+**Masking**: the U-flow masks the interpolated state z_s, the target
+velocity, and the predicted velocity at V=0 positions — not just the
+loss.  This prevents the network from ever seeing or producing non-zero
+values at null positions.
+
 Each run produces a self-contained results subdirectory under
 ``gaubump_scripts/results/<case_name>/`` containing training logs,
 GPU utilisation, and diagnostic plots.
 
 The full pipeline (Phase I warm-up + Phase II bootstrap) never sees
-ground-truth (X, V, U) triples.  Phase I trains both the V-classifier
+ground-truth (X, V, U) triples.  Phase I trains both the V-flow
 and U-flow on synthetic (X, V, U) drawn from the initial guess pihat.
-Phase II uses only ground-truth X observations; V is predicted by the
-bootstrap V-classifier, U is inferred by the bootstrap U-flow conditioned
-on the predicted V, and the empirical distribution over (V_hat, U_hat)
-is used to generate fresh training data.
+Phase II uses only ground-truth X observations; V is sampled by the
+bootstrap V-flow (then rounded), U is inferred by the bootstrap U-flow
+conditioned on the rounded V, and the empirical distribution over
+(V_hat, U_hat) is used to generate fresh training data.
 
 **Phase II restarts both optimisers from scratch** — new learning-rate
 schedules and fresh Adam moments — to avoid stale momentum from Phase I.
@@ -213,25 +219,32 @@ def run_training():
     import equinox as eqx
     import optax
 
-    class VClassifierMLP(eqx.Module):
-        """MLP that maps X → V logits (one per position)."""
+    class VFlowMLP(eqx.Module):
+        """MLP for flow matching on V (binary gate vector).
+
+        Learns the joint distribution over all V positions via rectified
+        flow matching.  At inference the ODE output is rounded to {0, 1}.
+        """
         layers: list
-        x_dim: int = eqx.field(static=True)
         v_dim: int = eqx.field(static=True)
+        x_dim: int = eqx.field(static=True)
 
         def __init__(self, T, L, hidden_dims, *, key):
-            x_dim = T - 2 * L + 1
             v_dim = T + 1
-            self.x_dim = x_dim
+            x_dim = T - 2 * L + 1
+            in_dim = v_dim + x_dim + 1  # noisy_V + X + s
             self.v_dim = v_dim
-            dims = [x_dim] + hidden_dims + [v_dim]
+            self.x_dim = x_dim
+            dims = [in_dim] + hidden_dims + [v_dim]
             keys = jax.random.split(key, len(dims) - 1)
             self.layers = []
             for i, (d_in, d_out) in enumerate(zip(dims[:-1], dims[1:])):
                 self.layers.append(eqx.nn.Linear(d_in, d_out, key=keys[i]))
 
-        def __call__(self, X):
-            x = X
+        def __call__(self, noisy_V, X, s):
+            s = jnp.atleast_1d(s)
+            inp = jnp.concatenate([noisy_V, X, s])
+            x = inp
             for layer in self.layers[:-1]:
                 x = jax.nn.gelu(layer(x))
             return self.layers[-1](x)
@@ -266,17 +279,23 @@ def run_training():
             x = self.layers[-1](x)
             return x
 
-    # ---- V-classifier loss ----
+    # ---- V-flow matching loss ----
 
-    def v_classifier_loss_single(v_model, X, V):
-        logits = v_model(X)
-        return jnp.mean(optax.sigmoid_binary_cross_entropy(logits, V))
+    def v_flow_loss_single(v_model, V, X, key):
+        """Rectified flow matching loss for one (X, V) pair."""
+        k1, k2 = jax.random.split(key)
+        s = jax.random.uniform(k1, shape=())
+        eps = jax.random.normal(k2, shape=V.shape)
+        z_s = (1.0 - s) * eps + s * V
+        target = V - eps
+        pred = v_model(z_s, X, s)
+        return jnp.mean((pred - target) ** 2)
 
     @eqx.filter_value_and_grad
-    def v_classifier_loss_batch(v_model, X, V):
+    def v_flow_loss_batch(v_model, V, X, keys):
         losses = jax.vmap(
-            lambda x, v: v_classifier_loss_single(v_model, x, v)
-        )(X, V)
+            lambda v, x, k: v_flow_loss_single(v_model, v, x, k)
+        )(V, X, keys)
         return jnp.mean(losses)
 
     # ---- masked flow matching loss ----
@@ -285,14 +304,15 @@ def run_training():
         k1, k2 = jax.random.split(key)
         s = jax.random.uniform(k1, shape=())
         eps = jax.random.normal(k2, shape=U_flat.shape)
-        z_s = (1.0 - s) * eps + s * U_flat
-        target = U_flat - eps
-        pred = model(z_s, X, V, s)
-        sq_err = (pred - target) ** 2
         V_mask = jnp.repeat(V, 2)
-        masked_err = sq_err * V_mask
+        # Mask interpolated state and target — null positions stay at zero
+        z_s = ((1.0 - s) * eps + s * U_flat) * V_mask
+        target = (U_flat - eps) * V_mask
+        pred = model(z_s, X, V, s)
+        pred = pred * V_mask  # mask predicted velocity
+        sq_err = (pred - target) ** 2
         n_active = jnp.maximum(V_mask.sum(), 1.0)
-        return masked_err.sum() / n_active
+        return sq_err.sum() / n_active
 
     @eqx.filter_value_and_grad
     def flow_matching_loss_batch(model, U, X, V, keys):
@@ -306,21 +326,22 @@ def run_training():
     # ---- flow sampling (conditioned on V) ----
 
     def sample_flow(model, X, V, key, n_steps=20):
+        V_mask = jnp.repeat(V, 2)
         z = jax.random.normal(key, shape=(model.u_dim,))
+        z = z * V_mask  # start from masked noise
         dt = 1.0 / n_steps
 
         def euler_step(i, z):
             s = i * dt
             v = model(z, X, V, jnp.array(s))
+            v = v * V_mask  # mask dynamics
             return z + dt * v
 
         z = jax.lax.fori_loop(0, n_steps, euler_step, z)
         # Clip logsigma
         logsigma_mask = jnp.tile(jnp.array([0.0, 1.0]), model.u_dim // 2)
         z = jnp.where(logsigma_mask, jnp.clip(z, -4.0, 4.0), z)
-        # Zero out null positions
-        V_mask = jnp.repeat(V, 2)
-        z = z * V_mask
+        z = z * V_mask  # final mask
         return z
 
     @eqx.filter_jit
@@ -332,6 +353,30 @@ def run_training():
             lambda x, v, k: sample_flow(model, x, v, k, n_steps)
         )(X_batch, V_batch, keys)
         return U_flat.reshape(batch, T_plus_1, 2)
+
+    # ---- V-flow sampling (ODE → round to {0, 1}) ----
+
+    def sample_v_flow(v_model, X, key, n_steps=20):
+        """Sample V by integrating the V-flow ODE, then round to {0, 1}."""
+        z = jax.random.normal(key, shape=(v_model.v_dim,))
+        dt = 1.0 / n_steps
+
+        def euler_step(i, z):
+            s = i * dt
+            vel = v_model(z, X, jnp.array(s))
+            return z + dt * vel
+
+        z = jax.lax.fori_loop(0, n_steps, euler_step, z)
+        return (z > 0.5).astype(jnp.float32)
+
+    @eqx.filter_jit
+    def sample_v_flow_batch(v_model, X_batch, key, n_steps=20):
+        """Sample V for a batch of observations."""
+        batch = X_batch.shape[0]
+        keys = jax.random.split(key, batch)
+        return jax.vmap(
+            lambda x, k: sample_v_flow(v_model, x, k, n_steps)
+        )(X_batch, keys)
 
     # ---- update steps ----
 
@@ -345,8 +390,10 @@ def run_training():
         return new_model, new_opt_state, loss
 
     @eqx.filter_jit
-    def update_step_v(v_model, opt_state, optimizer, X, V):
-        loss, grads = v_classifier_loss_batch(v_model, X, V)
+    def update_step_v(v_model, opt_state, optimizer, X, V, key):
+        batch = X.shape[0]
+        keys = jax.random.split(key, batch)
+        loss, grads = v_flow_loss_batch(v_model, V, X, keys)
         updates, new_opt_state = optimizer.update(grads, opt_state, v_model)
         new_model = eqx.apply_updates(v_model, updates)
         return new_model, new_opt_state, loss
@@ -365,15 +412,15 @@ def run_training():
         return jnp.mean(losses)
 
     @eqx.filter_jit
-    def eval_v_accuracy(v_model, X, V):
-        logits = jax.vmap(v_model)(X)
-        preds = (logits > 0.0).astype(jnp.float32)
-        return jnp.mean(preds == V)
+    def eval_v_accuracy(v_model, X, V, key):
+        """Sample V from V-flow and compute accuracy vs true V."""
+        V_pred = sample_v_flow_batch(v_model, X, key)
+        return jnp.mean(V_pred == V)
 
     # ================================================================
     # ██  CASE CONFIGURATION  ██
     # ================================================================
-    case_name = "case_v_binary_np95_pihat95"
+    case_name = "case_v_flow_masked_np95_pihat95"
 
     L = 3
     T = 20
@@ -428,8 +475,8 @@ def run_training():
 
     # Initialise networks
     key, v_model_key, u_model_key = jax.random.split(key, 3)
-    v_model = VClassifierMLP(T=T, L=L, hidden_dims=hidden_dims,
-                             key=v_model_key)
+    v_model = VFlowMLP(T=T, L=L, hidden_dims=hidden_dims,
+                       key=v_model_key)
     u_model = VelocityMLP(T=T, L=L, hidden_dims=hidden_dims,
                           key=u_model_key)
 
@@ -460,7 +507,7 @@ def run_training():
     log("=== JIT warmup ===")
     t_warmup = time_mod.time()
 
-    key, k1, k2, k3, k4, k5, k6, k7 = jax.random.split(key, 8)
+    key, k1, k2, k3, k4, k5, k6, k7, k8 = jax.random.split(key, 9)
     _X1, _V1, _U1 = sample_XVU_mixture(
         k1, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
     _X2, _V2, _ = sample_XVU_mixture(
@@ -468,13 +515,15 @@ def run_training():
     _, _, _loss_u = update_step_u(
         u_model, opt_state_u, optimizer_u_p1, _U1, _X1, _V1, k3)
     _, _, _loss_v = update_step_v(
-        v_model, opt_state_v, optimizer_v_p1, _X1, _V1)
-    _Uinf = sample_flow_batch(u_model, _X2, _V2, k4)
-    _V_flat = _V2.reshape(-1)
+        v_model, opt_state_v, optimizer_v_p1, _X1, _V1, k4)
+    # Warm up V-flow sampling
+    _V_pred = sample_v_flow_batch(v_model, _X2, k5)
+    _Uinf = sample_flow_batch(u_model, _X2, _V_pred, k6)
+    _V_flat = _V_pred.reshape(-1)
     _U_flat = _Uinf.reshape(-1, 2)
     _X3, _V3, _U3 = sample_XVU_empirical(
-        k5, _V_flat, _U_flat, L, T, n_eachstep_samples)
-    _acc = eval_v_accuracy(v_model, _X1, _V1)
+        k7, _V_flat, _U_flat, L, T, n_eachstep_samples)
+    _acc = eval_v_accuracy(v_model, _X1, _V1, k8)
     jax.block_until_ready((_X1, _X2, _X3, _loss_u, _loss_v, _Uinf, _acc))
 
     dt_warmup = time_mod.time() - t_warmup
@@ -492,7 +541,8 @@ def run_training():
     # JIT-warm the eval functions
     _eval_loss = eval_flow_loss(
         u_model, U_eval_gt, X_eval_gt, V_eval_gt, eval_key_fixed)
-    _eval_acc = eval_v_accuracy(v_model, X_eval_gt, V_eval_gt)
+    _eval_acc = eval_v_accuracy(v_model, X_eval_gt, V_eval_gt,
+                                eval_key_fixed)
     jax.block_until_ready((_eval_loss, _eval_acc))
     log(f"Eval warmed up (initial GT U-loss={float(_eval_loss):.4f}, "
         f"V-acc={float(_eval_acc):.4f})")
@@ -597,7 +647,7 @@ def run_training():
     log("  X-data plots saved")
 
     # ================================================================
-    # Phase I — warm-up on pihat (train BOTH V-classifier and U-flow)
+    # Phase I — warm-up on pihat (train BOTH V-flow and U-flow)
     # ================================================================
     log(f"=== Phase I ({n_phase1_steps} steps, "
         f"pihat null_prob={null_prob_init}) ===")
@@ -605,21 +655,22 @@ def run_training():
     t_phase1 = time_mod.time()
 
     for step in range(n_phase1_steps):
-        key, k_data, k_step = jax.random.split(key, 3)
+        key, k_data, k_step_u, k_step_v = jax.random.split(key, 4)
         X, V, U = sample_XVU_mixture(
             k_data, np_hat, w_hat, m_hat, s_hat, L, T, n_init_samples)
         u_model, opt_state_u, loss_u = update_step_u(
-            u_model, opt_state_u, optimizer_u_p1, U, X, V, k_step)
+            u_model, opt_state_u, optimizer_u_p1, U, X, V, k_step_u)
         v_model, opt_state_v, loss_v = update_step_v(
-            v_model, opt_state_v, optimizer_v_p1, X, V)
+            v_model, opt_state_v, optimizer_v_p1, X, V, k_step_v)
         if step % log_interval_p1 == 0 or step == n_phase1_steps - 1:
             log(f"  step {step:5d}  U-loss={float(loss_u):.6f}"
                 f"  V-loss={float(loss_v):.6f}")
         if step % eval_interval_p1 == 0 or step == n_phase1_steps - 1:
+            key, k_eval_v = jax.random.split(key)
             gt_u_loss = float(eval_flow_loss(
                 u_model, U_eval_gt, X_eval_gt, V_eval_gt, eval_key_fixed))
             v_acc = float(eval_v_accuracy(
-                v_model, X_eval_gt, V_eval_gt))
+                v_model, X_eval_gt, V_eval_gt, k_eval_v))
             p1_steps_loss.append(step)
             p1_u_train_losses.append(float(loss_u))
             p1_u_gt_losses.append(gt_u_loss)
@@ -638,14 +689,13 @@ def run_training():
     # Post-Phase-I diagnostic
     # ================================================================
     log("=== Post-Phase-I diagnostic ===")
-    key, k_p1d_x, k_p1d_inf = jax.random.split(key, 3)
+    key, k_p1d_x, k_p1d_v, k_p1d_inf = jax.random.split(key, 4)
     n_p1_diag = 512
     X_p1d, V_p1d_true, U_p1d_true = sample_XVU_mixture(
         k_p1d_x, np_true, w_true, m_true, s_true, L, T, n_p1_diag)
 
-    # Predict V with V-classifier
-    V_p1d_pred_logits = jax.vmap(v_model)(X_p1d)
-    V_p1d_pred = (V_p1d_pred_logits > 0.0).astype(jnp.float32)
+    # Sample V with V-flow (round to {0,1})
+    V_p1d_pred = sample_v_flow_batch(v_model, X_p1d, k_p1d_v)
 
     # Infer U with flow conditioned on predicted V
     U_p1d_inferred = jax.lax.stop_gradient(
@@ -667,7 +717,7 @@ def run_training():
     log("  [NOTE] Both optimisers restarted: fresh cosine schedule + "
         "Adam moments")
 
-    # Bootstrap models: V-classifier + U-flow (initialized from Phase I)
+    # Bootstrap models: V-flow + U-flow (initialized from Phase I)
     schedule_v_p2 = optax.cosine_decay_schedule(
         init_value=lr, decay_steps=n_phase2_steps)
     optimizer_v_p2 = optax.chain(
@@ -684,10 +734,10 @@ def run_training():
     )
     opt_state_u = optimizer_u_p2.init(u_model)
 
-    # Oracle models: fresh V-classifier + fresh U-flow (from scratch)
+    # Oracle models: fresh V-flow + fresh U-flow (from scratch)
     key, oracle_v_key, oracle_u_key = jax.random.split(key, 3)
-    oracle_v_model = VClassifierMLP(T=T, L=L, hidden_dims=hidden_dims,
-                                    key=oracle_v_key)
+    oracle_v_model = VFlowMLP(T=T, L=L, hidden_dims=hidden_dims,
+                              key=oracle_v_key)
     oracle_u_model = VelocityMLP(T=T, L=L, hidden_dims=hidden_dims,
                                  key=oracle_u_key)
 
@@ -706,7 +756,7 @@ def run_training():
         optax.adam(learning_rate=schedule_oracle_u),
     )
     oracle_opt_state_u = optimizer_oracle_u.init(oracle_u_model)
-    log("  [Oracle] Fresh V-classifier + U-flow initialised from scratch")
+    log("  [Oracle] Fresh V-flow + U-flow initialised from scratch")
 
     t_phase2 = time_mod.time()
 
@@ -718,17 +768,16 @@ def run_training():
         return step % 7500 == 0 or step == n_phase2_steps - 1
 
     for step in range(n_phase2_steps):
-        key, k_true, k_infer, k_data, k_step_u, k_step_v, k_oracle = (
-            jax.random.split(key, 7))
+        key, k_true, k_v_sample, k_infer, k_data, k_step_u, k_step_v, k_oracle = (
+            jax.random.split(key, 8))
 
         # (a) Draw X from true distribution (discard true V, U)
         X_true, _, _ = sample_XVU_mixture(
             k_true, np_true, w_true, m_true, s_true, L, T, n_source)
 
-        # (b) Predict V_hat with bootstrap V-classifier
-        V_hat_logits = jax.vmap(v_model)(X_true)
-        V_hat = (V_hat_logits > 0.0).astype(jnp.float32)
-        V_hat = jax.lax.stop_gradient(V_hat)
+        # (b) Sample V_hat with bootstrap V-flow (round to {0,1})
+        V_hat = jax.lax.stop_gradient(
+            sample_v_flow_batch(v_model, X_true, k_v_sample))
 
         # (c) Infer U_hat with bootstrap U-flow conditioned on V_hat
         U_inferred = jax.lax.stop_gradient(
@@ -744,14 +793,14 @@ def run_training():
         X_new, V_new, U_new = sample_XVU_empirical(
             k_data, V_flat, U_flat, L, T, n_eachstep_samples)
 
-        # (e) Train bootstrap V-classifier and U-flow
+        # (e) Train bootstrap V-flow and U-flow
         u_model, opt_state_u, loss_u = update_step_u(
             u_model, opt_state_u, optimizer_u_p2, U_new, X_new, V_new,
             k_step_u)
         v_model, opt_state_v, loss_v = update_step_v(
-            v_model, opt_state_v, optimizer_v_p2, X_new, V_new)
+            v_model, opt_state_v, optimizer_v_p2, X_new, V_new, k_step_v)
 
-        # (f) Train oracle V-classifier and U-flow on ground-truth
+        # (f) Train oracle V-flow and U-flow on ground-truth
         k_oracle_data, k_oracle_step_u, k_oracle_step_v = (
             jax.random.split(k_oracle, 3))
         X_oracle, V_oracle, U_oracle = sample_XVU_mixture(
@@ -762,11 +811,10 @@ def run_training():
             U_oracle, X_oracle, V_oracle, k_oracle_step_u)
         oracle_v_model, oracle_opt_state_v, oracle_loss_v = update_step_v(
             oracle_v_model, oracle_opt_state_v, optimizer_oracle_v,
-            X_oracle, V_oracle)
+            X_oracle, V_oracle, k_oracle_step_v)
 
         if should_log_p2(step):
             frac_null = float(jnp.mean(V_flat == 0.0))
-            v_acc_step = float(jnp.mean(V_hat == V_hat))  # self-consistency
             current_lr = float(schedule_u_p2(step))
             log(
                 f"  iter {step:6d}  U-loss={float(loss_u):.6f}  "
@@ -800,14 +848,13 @@ def run_training():
     # Final diagnostic inference
     # ================================================================
     log("=== Final diagnostic inference ===")
-    key, k_diag_true, k_diag_infer = jax.random.split(key, 3)
+    key, k_diag_true, k_diag_v, k_diag_infer = jax.random.split(key, 4)
     n_diag = 1024
     X_diag, V_diag_true, U_diag_true = sample_XVU_mixture(
         k_diag_true, np_true, w_true, m_true, s_true, L, T, n_diag)
 
-    # Predict V
-    V_diag_pred_logits = jax.vmap(v_model)(X_diag)
-    V_diag_pred = (V_diag_pred_logits > 0.0).astype(jnp.float32)
+    # Sample V with V-flow
+    V_diag_pred = sample_v_flow_batch(v_model, X_diag, k_diag_v)
 
     # Infer U conditioned on predicted V
     U_diag_inferred = jax.lax.stop_gradient(
@@ -823,7 +870,7 @@ def run_training():
     log(f"  n_diag={n_diag}, total marks={V_diag_flat.shape[0]}")
     log(f"  frac(V=0) inferred   = {frac_v_zero:.3f}")
     log(f"  true null_prob       = {null_prob_true}")
-    log(f"  V-classifier acc     = {v_acc_final:.3f}")
+    log(f"  V-flow acc           = {v_acc_final:.3f}")
     log(f"  post-Phase-I frac(V=0) = {frac_null_p1:.3f}")
     log(f"  post-Phase-I V-acc     = {v_acc_p1:.3f}")
     log(f"  total wall time        = {time_mod.time() - _t0:.1f}s")
@@ -897,7 +944,7 @@ def run_training():
         f"{case_name}  L={L}, T={T}, seed={seed}\n"
         f"null_prob_true={null_prob_true}, null_prob_init={null_prob_init}, "
         f"phase1={n_phase1_steps}, phase2={n_phase2_steps}  "
-        f"[V-binary shape, Phase II: fresh optimisers]",
+        f"[V-flow + masked U-flow, Phase II: fresh optimisers]",
         fontsize=11)
     fig.tight_layout()
     buf = io.BytesIO()
@@ -1010,10 +1057,10 @@ def run_training():
     ax1.plot(p1_steps_loss, p1_u_gt_losses,
              label="GT eval U-flow loss", color="tab:orange", lw=2)
     ax1.plot(p1_steps_loss, p1_v_losses,
-             label="V-classifier loss", color="tab:red", lw=1.5, ls="--")
+             label="V-flow loss", color="tab:red", lw=1.5, ls="--")
     ax1.set_xlabel("Phase I step")
     ax1.set_ylabel("Loss")
-    ax1.set_title("Phase I: Warm-up on π̂ (U-flow + V-classifier)")
+    ax1.set_title("Phase I: Warm-up on π̂ (U-flow + V-flow)")
     ax1.legend(fontsize=9)
     ax1.grid(True, alpha=0.3)
 

@@ -43,18 +43,20 @@ The **null probability** is $\Pr(V=0)$.
 
 Estimate $\pi$ from samples of $X$ alone (the latent $(V, U)$ is unobserved).
 
-## Approach — Two-Model Rectified Flow Matching
+## Approach — Two-Flow Rectified Flow Matching
 
-We train **two** models simultaneously:
+We train **two flow matching networks** simultaneously:
 
-1. **V-classifier** (`VClassifierMLP`): maps $X \to V$ logits
-   (one per position), trained with binary cross-entropy.
+1. **V-flow** (`VFlowMLP`): rectified flow matching for the binary gate
+   vector $V \in \{0,1\}^{T+1}$, conditioned on $X$.  At inference the
+   ODE output is rounded to $\{0, 1\}$.  Unlike independent logits, this
+   captures the joint distribution over all V positions.
 
 2. **U-flow** (`VelocityMLP`): rectified flow matching for
    $U \in \mathbb{R}^{(T+1) \times 2}$, conditioned on $(X, V)$.
-   The flow matching loss is **masked** so that only active ($V=1$)
-   positions contribute — null positions are trivially zero and don't
-   waste model capacity.
+   The interpolated state $z_s$, target velocity, and predicted velocity
+   are all **masked** at $V=0$ positions — not just the loss — so the
+   network never sees or produces non-zero values at null positions.
 
 ### Phase I — Warm-up
 
@@ -66,7 +68,7 @@ guess $\hat\pi$.  Each gradient step uses freshly simulated data.
 Repeat:
 
 1. Draw `n_source` samples of $X$ from the **true** model $(L, T, \pi)$.
-2. Predict $\hat V$ using the V-classifier (stop-gradient).
+2. Sample $\hat V$ using the V-flow (integrate ODE, round to $\{0,1\}$; stop-gradient).
 3. Infer $\hat U$ using the U-flow conditioned on $\hat V$ (stop-gradient).
    Null positions ($\hat V = 0$) get $U = (0, 0)$.
 4. Define $\hat\pi$ as the empirical distribution over $(\hat V, \hat U)$.
@@ -82,7 +84,7 @@ on ground-truth $(X, V, U)$ from the true $\pi$ as a reference.
 |------|-------------|
 | `README.md` | This file |
 | `model.py` | Generative model: V-binary shape function, sampling $(V, U)$, computing $X$ |
-| `flow_matching.py` | V-classifier, velocity network, masked flow loss, ODE sampling |
+| `flow_matching.py` | V-flow, velocity network, masked flow loss, ODE sampling |
 | `train.py` | Local end-to-end training script (Phase I + Phase II), CLI |
 | `run_modal_experiment.py` | Self-contained Modal GPU experiment runner (parameterised) |
 | `results/` | Output directories from completed experiment runs |

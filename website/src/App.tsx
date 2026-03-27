@@ -3,7 +3,7 @@ import { type CSSProperties } from "react";
 /* ------------------------------------------------------------------ */
 /*  Paths to result images (served from public/)                       */
 /* ------------------------------------------------------------------ */
-const CASE = "case_v_binary_np95_pihat95";
+const CASE = "case_v_flow_masked_np95_pihat95";
 const img = (name: string) => `/results/${CASE}/${name}`;
 
 /* ------------------------------------------------------------------ */
@@ -195,22 +195,25 @@ export default function App() {
 
       {/* ---- What We Do ---- */}
       <section style={section}>
-        <h2 style={h2Style}>What We Do: Two-Model Rectified Flow Matching</h2>
+        <h2 style={h2Style}>What We Do: Two-Flow Rectified Flow Matching</h2>
 
         <p style={pStyle}>
-          We train <strong>two</strong> networks simultaneously:
+          We train <strong>two flow matching networks</strong> simultaneously:
         </p>
         <ol style={{ ...pStyle, paddingLeft: "1.5rem" }}>
           <li>
-            <strong>V-classifier</strong> — an MLP that predicts the binary gate
-            V from X (binary cross-entropy loss).
+            <strong>V-flow</strong> — a rectified flow matching network that
+            learns the <em>joint</em> distribution of the binary gate vector V
+            given X.  At inference the ODE output is rounded to &#123;0, 1&#125;.
+            Unlike independent logits, flow matching captures correlations
+            between positions.
           </li>
           <li>
             <strong>U-flow</strong> — a conditional rectified flow matching
             network that maps noise to <code>U ∈ ℝ⁽ᵀ⁺¹⁾ˣ²</code> given (X, V).
-            The flow matching loss is <em>masked</em> so that only active (V=1)
-            positions contribute — null positions are trivially zero and don't
-            waste model capacity.
+            Both the interpolated state, target velocity, and predicted velocity
+            are <em>masked</em> at V=0 positions — not just the loss — so the
+            network never sees or produces non-zero values at null positions.
           </li>
         </ol>
 
@@ -226,7 +229,8 @@ export default function App() {
             Draw X samples from the <strong>true</strong> model (L, T, π).
           </li>
           <li>
-            Predict V̂ using the V-classifier (stop-gradient).
+            Predict V̂ using the V-flow network (integrate ODE, round to
+            &#123;0, 1&#125;; stop-gradient).
           </li>
           <li>
             Infer Û using the U-flow conditioned on V̂ (stop-gradient).
@@ -246,16 +250,13 @@ export default function App() {
           true π as a performance reference.
         </p>
 
-        <h3 style={h3Style}>Key insight: binary V separates null classification
-          from mark prediction</h3>
+        <h3 style={h3Style}>Key insight: two flows with masked dynamics</h3>
         <p style={pStyle}>
-          The previous approach used <code>softplus(ρ)</code> with null marks at
-          ρ = −10.  This led to inflated flow matching losses because the model
-          wasted capacity trying to predict arbitrary (ρ, log σ) values in the
-          null regime — parameters that don't affect X at all. The binary V
-          cleanly separates the "is this mark null?" question (handled by the
-          V-classifier) from the "what are its parameters?" question (handled by
-          the masked U-flow).
+          The V-flow learns the <em>joint</em> distribution of the binary gate
+          vector — capturing correlations between positions that independent
+          logits miss.  The U-flow masks the interpolated state, target velocity,
+          and predicted velocity at V=0 positions (not just the loss), ensuring
+          the network never sees or produces non-zero values at null positions.
         </p>
       </section>
 
@@ -264,7 +265,7 @@ export default function App() {
         <h2 style={h2Style}>What We Find</h2>
 
         <h3 style={h3Style}>
-          Case study: <code>case_v_binary_np95_pihat95</code>
+          Case study: <code>case_v_flow_masked_np95_pihat95</code>
         </h3>
 
         <div style={tableWrap}>
@@ -302,7 +303,7 @@ export default function App() {
               </tr>
               <tr>
                 <td style={tdStyle}>Architecture</td>
-                <td style={tdStyle}>V-classifier + masked U-flow</td>
+                <td style={tdStyle}>V-flow + masked U-flow</td>
               </tr>
               <tr>
                 <td style={tdStyle}>Seed</td>
@@ -313,10 +314,10 @@ export default function App() {
         </div>
 
         <p style={pStyle}>
-          The binary-V two-model architecture cleanly separates null
-          classification from mark parameter prediction, enabling the flow
-          matching loss to focus exclusively on learning the distribution of
-          active marks.
+          The two-flow architecture with masked dynamics cleanly separates
+          joint null/active gate prediction (V-flow) from mark parameter
+          prediction (masked U-flow), while ensuring the U-flow never sees
+          or produces non-zero values at null positions.
         </p>
       </section>
 
@@ -334,7 +335,7 @@ export default function App() {
 
         <p style={pStyle}>
           In <strong>Phase I</strong>, we plot the U-flow training loss,
-          GT eval U-flow loss, and V-classifier loss. All losses decrease
+          GT eval U-flow loss, and V-flow loss. All losses decrease
           together, confirming that training on the proxy distribution also
           improves performance on real data.
         </p>
@@ -358,7 +359,7 @@ export default function App() {
         <Figure
           src={img("loss_curves.png")}
           alt="Flow matching loss curves"
-          caption="Loss curves evaluated on 512 fixed ground-truth (X, V, U) triples. Left: Phase I shows U-flow training loss, GT eval loss, and V-classifier loss. Right: Phase II compares the bootstrap model (orange) against an oracle model trained from scratch (green dashed)."
+          caption="Loss curves evaluated on 512 fixed ground-truth (X, V, U) triples. Left: Phase I shows U-flow training loss, GT eval loss, and V-flow loss. Right: Phase II compares the bootstrap model (orange) against an oracle model trained from scratch (green dashed)."
         />
       </section>
 
@@ -384,7 +385,7 @@ export default function App() {
         <Figure
           src={img("posterior_vs_truth.png")}
           alt="Posterior vs truth scatter"
-          caption="Ground-truth π samples vs aggregate posterior (V, U) inferred by the two-model architecture"
+          caption="Ground-truth π samples vs aggregate posterior (V, U) inferred by the two-flow architecture"
         />
 
         <h3 style={h3Style}>ρ marginal distribution</h3>
