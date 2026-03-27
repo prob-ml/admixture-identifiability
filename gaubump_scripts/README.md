@@ -15,68 +15,74 @@ continuous mark space $S = \mathbb{R}^2$.
 | $L$ | support window (integer) |
 | $T$ | visible window (integer) |
 | $\pi$ | shape distribution on $\mathbb{R}^2$ |
+| $V$ | binary gate (0 = null, 1 = active) |
 | $(\rho, \log\sigma)$ | a point in the mark space |
 
-**Shape function (softplus nonlinearity).**
-Each mark $(\rho, \log\sigma) \in \mathbb{R}^2$ defines a shape on
-$\{-L, \dots, L\}$:
+**Shape function (V-binary gating).**
+Each mark has a binary gate $V \in \{0,1\}$ and parameters
+$(\rho, \log\sigma) \in \mathbb{R}^2$.  The shape on $\{-L, \dots, L\}$ is:
 
-$$f(x) = \operatorname{softplus}(\rho)\;\exp\!\bigl(-x^2 / 2e^{2\log\sigma}\bigr).$$
+$$f(x) = V \cdot \rho \;\exp\!\bigl(-x^2 / 2e^{2\log\sigma}\bigr).$$
 
-The softplus nonlinearity ($\log(1+e^\rho)$) ensures positive amplitudes
-and provides smooth gradients near zero.  Null marks use $\rho = -10$
-($\operatorname{softplus}(-10) \approx 4.5 \times 10^{-5}$), which
-produces faint background-like noise rather than an exact zero — this
-gives the model a well-behaved gradient signal for learning zero amplitude.
+When $V=0$ (null mark), the contribution to $X$ is exactly zero and
+$(ρ, \log σ) = (0, 0)$ by convention.  When $V=1$ (active mark),
+$\rho$ is used directly as the amplitude (no softplus).
 
 **Generative process.**
 Given $(L, T, \pi)$, a single draw of $X \in \mathbb{R}^{T-2L+1}$ is:
 
-1. For each $t \in \{0, 1, \dots, T\}$, sample $U_t = (\rho_t, \log\sigma_t) \sim \pi$.
+1. For each $t \in \{0, 1, \dots, T\}$, sample $(V_t, U_t) = (V_t, \rho_t, \log\sigma_t) \sim \pi$.
 2. For each $t \in \{L, \dots, T-L\}$, set
 
 $$X_t = \sum_{\tau=0}^{T}
-        \operatorname{softplus}(\rho_\tau) \exp\!\bigl(-(t-\tau)^2 / 2e^{2\log\sigma_\tau}\bigr).$$
+        V_\tau \cdot \rho_\tau \;\exp\!\bigl(-(t-\tau)^2 / 2e^{2\log\sigma_\tau}\bigr).$$
 
-The **null shape probability** is the mass $\pi$ assigns near
-$\rho = -10$ (i.e.\ where $\operatorname{softplus}(\rho) \approx 0$).
+The **null probability** is $\Pr(V=0)$.
 
 ## Goal
 
-Estimate $\pi$ from samples of $X$ alone (the latent $U$ is unobserved).
+Estimate $\pi$ from samples of $X$ alone (the latent $(V, U)$ is unobserved).
 
-## Approach — Rectified Flow Matching
+## Approach — Two-Model Rectified Flow Matching
 
-We train a *conditional* rectified flow matching network that learns to
-map noise to $U \in \mathbb{R}^{(T+1) \times 2}$ given $X$.
+We train **two** models simultaneously:
+
+1. **V-classifier** (`VClassifierMLP`): maps $X \to V$ logits
+   (one per position), trained with binary cross-entropy.
+
+2. **U-flow** (`VelocityMLP`): rectified flow matching for
+   $U \in \mathbb{R}^{(T+1) \times 2}$, conditioned on $(X, V)$.
+   The flow matching loss is **masked** so that only active ($V=1$)
+   positions contribute — null positions are trivially zero and don't
+   waste model capacity.
 
 ### Phase I — Warm-up
 
-Train the flow network on $(X, U)$ pairs sampled from an initial guess
-$\hat\pi$.  Each gradient step uses freshly simulated data (no fixed
-dataset, no repeated samples).
+Train both networks on $(X, V, U)$ triples sampled from an initial
+guess $\hat\pi$.  Each gradient step uses freshly simulated data.
 
 ### Phase II — Iterative refinement
 
 Repeat:
 
 1. Draw `n_source` samples of $X$ from the **true** model $(L, T, \pi)$.
-2. Push each $X$ through the current flow network to obtain
-   `n_source × (T+1)` samples of $U \in \mathbb{R}^2$ (stop-gradient).
-3. Define $\hat\pi$ as the empirical distribution on these samples.
-4. Train the flow network for one epoch on freshly simulated $(X, U)$
-   pairs under the new $\hat\pi$ (never reuse samples).
+2. Predict $\hat V$ using the V-classifier (stop-gradient).
+3. Infer $\hat U$ using the U-flow conditioned on $\hat V$ (stop-gradient).
+   Null positions ($\hat V = 0$) get $U = (0, 0)$.
+4. Define $\hat\pi$ as the empirical distribution over $(\hat V, \hat U)$.
+5. Train both models on freshly simulated $(X, V, U)$ from $\hat\pi$.
 
-Phase II restarts the optimiser from scratch (fresh cosine schedule and
-Adam moments) to avoid stale momentum from Phase I.
+Phase II restarts both optimisers from scratch (fresh cosine schedules
+and Adam moments).  An **oracle** pair of models is trained in parallel
+on ground-truth $(X, V, U)$ from the true $\pi$ as a reference.
 
 ## Files
 
 | File | Description |
 |------|-------------|
 | `README.md` | This file |
-| `model.py` | Generative model: shape function (softplus), sampling $U$, computing $X$ |
-| `flow_matching.py` | MLP velocity network, flow-matching loss, ODE sampling |
+| `model.py` | Generative model: V-binary shape function, sampling $(V, U)$, computing $X$ |
+| `flow_matching.py` | V-classifier, velocity network, masked flow loss, ODE sampling |
 | `train.py` | Local end-to-end training script (Phase I + Phase II), CLI |
 | `run_modal_experiment.py` | Self-contained Modal GPU experiment runner (parameterised) |
 | `results/` | Output directories from completed experiment runs |
@@ -99,10 +105,11 @@ Each run produces:
 | `gpu_utilization.txt` | GPU utilisation time series |
 | `xdata_true.png` | Example X observations from the true model |
 | `xdata_pihat.png` | Example X observations from the initial guess |
-| `posterior_vs_truth.png` | Scatter: ground-truth π vs inferred aggregate posterior |
-| `rho_marginal.png` | Histogram: marginal of ρ (true vs inferred) |
-| `rho_survival.png` | Survival function: P(softplus(ρ) > t) |
-| `true_vs_inferred_U.png` | Scatter: true latent U vs inferred U |
+| `posterior_vs_truth.png` | Scatter: ground-truth π vs inferred (V, U) |
+| `rho_marginal.png` | Histogram: marginal of ρ for V=1 marks |
+| `rho_survival.png` | Survival function of ρ for V=1 marks |
+| `true_vs_inferred_U.png` | Scatter: true latent (V, U) vs inferred |
+| `loss_curves.png` | Phase I + Phase II loss curves (bootstrap vs oracle) |
 
 ### Running locally (without Modal)
 
@@ -110,19 +117,3 @@ Each run produces:
 cd gaubump_scripts
 python train.py [--L 3] [--T 20] [--n_phase1 2000] [--n_phase2 200] ...
 ```
-
-## Current results
-
-### `case_softplus_np95_pihat95`
-
-Configuration: $L=3$, $T=20$, `null_prob_true=0.95`, `null_prob_init=0.95`,
-10 000 Phase I steps, 150 000 Phase II steps, seed 42.
-
-| Metric | Value |
-|--------|-------|
-| Post-Phase I frac(softplus(ρ) < 0.1) | 0.956 |
-| Final frac(softplus(ρ) < 0.1) | 0.952 |
-| True null probability | 0.950 |
-
-Phase II bootstrap remains **stable** throughout all 150k iterations
-(frac ≈ 0.95 ± 0.01), thanks to the softplus nonlinearity.
