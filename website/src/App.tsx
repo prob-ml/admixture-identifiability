@@ -301,7 +301,7 @@ export default function App() {
               <tr>
                 <td style={tdStyle}>Post-Phase I frac(softplus(ρ) &lt; 0.1)</td>
                 <td style={tdStyle}>
-                  <strong>0.954</strong>
+                  <strong>0.955</strong>
                 </td>
               </tr>
               <tr>
@@ -309,7 +309,7 @@ export default function App() {
                   Final frac(softplus(ρ) &lt; 0.1) (after 150k Phase II steps)
                 </td>
                 <td style={tdStyle}>
-                  <strong>0.954</strong>
+                  <strong>0.949</strong>
                 </td>
               </tr>
               <tr>
@@ -347,18 +347,28 @@ export default function App() {
         </p>
 
         <p style={pStyle}>
-          In <strong>Phase II</strong>, we show only the GT eval loss. The
-          training distribution shifts at each bootstrap iteration (it is
-          defined by the model's own inferred U), so the training loss is not
-          directly comparable across steps. The GT eval loss initially rises as
-          the bootstrap distribution changes, then steadily decreases as the
-          model refines its posterior estimate.
+          In <strong>Phase II</strong>, we compare two models evaluated on the
+          same fixed GT data. The <em>bootstrap model</em> (initialised from
+          Phase I) is trained using the bootstrap/empirical-π procedure — it
+          never sees ground-truth U. The <em>oracle model</em> is initialised
+          from scratch (random weights) and trained on fresh ground-truth{" "}
+          <code>(X, U)</code> pairs drawn from the true π at each step. This
+          oracle serves as a reference: it shows the best loss achievable by
+          a model with access to real data, starting from the same
+          architecture with no prior information.
+        </p>
+
+        <p style={pStyle}>
+          The y-axis is clipped so that both curves are visible — using{" "}
+          <code>min(oracle_max, bootstrap_max)</code> as the upper limit to
+          avoid showing the very large early losses from the randomly
+          initialised oracle.
         </p>
 
         <Figure
           src={img("loss_curves.png")}
           alt="Flow matching loss curves"
-          caption="Flow matching loss evaluated on 512 fixed ground-truth (X, U) pairs. Left: Phase I (warm-up on π̂) shows both training and GT eval loss. Right: Phase II (bootstrap) shows GT eval loss only."
+          caption="Flow matching loss evaluated on 512 fixed ground-truth (X, U) pairs. Left: Phase I (warm-up on π̂) shows both training and GT eval loss. Right: Phase II compares the bootstrap model (orange) against an oracle model trained from scratch on real data (green dashed)."
         />
       </section>
 
