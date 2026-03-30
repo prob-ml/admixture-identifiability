@@ -420,7 +420,10 @@ def run_training():
     # ================================================================
     # ██  CASE CONFIGURATION  ██
     # ================================================================
-    case_name = "case_v_flow_masked_np95_pihat95"
+    # Change which_case to select the experiment configuration.
+    #   "np95_pihat95"  — initial pihat P(V=0)=0.95, broad single Gaussian
+    #   "np95_pihat80"  — initial pihat P(V=0)=0.80, shifted single Gaussian
+    which_case = "np95_pihat80"
 
     L = 3
     T = 20
@@ -433,7 +436,7 @@ def run_training():
     hidden_dims = [256, 256, 256]
     seed = 42
 
-    # ---- Ground-truth distribution ----
+    # ---- Ground-truth distribution (shared across cases) ----
     null_prob_true = 0.95
     pi_true = ShapeDistribution(
         null_prob=null_prob_true,
@@ -451,18 +454,35 @@ def run_training():
         ],
     )
 
-    # ---- Initial guess (pihat) for Phase I ----
-    null_prob_init = 0.95
-    pihat = ShapeDistribution(
-        null_prob=null_prob_init,
-        components=[
-            GaussianComponent(
-                weight=1.0,
-                mean=jnp.array([1.0, 0.0]),
-                std=jnp.array([1.0, 1.0]),
-            ),
-        ],
-    )
+    # ---- Initial guess (pihat) for Phase I — varies per case ----
+    if which_case == "np95_pihat95":
+        case_name = "case_v_flow_masked_np95_pihat95"
+        null_prob_init = 0.95
+        pihat = ShapeDistribution(
+            null_prob=null_prob_init,
+            components=[
+                GaussianComponent(
+                    weight=1.0,
+                    mean=jnp.array([1.0, 0.0]),
+                    std=jnp.array([1.0, 1.0]),
+                ),
+            ],
+        )
+    elif which_case == "np95_pihat80":
+        case_name = "case_v_flow_masked_np95_pihat80"
+        null_prob_init = 0.80
+        pihat = ShapeDistribution(
+            null_prob=null_prob_init,
+            components=[
+                GaussianComponent(
+                    weight=1.0,
+                    mean=jnp.array([1.5, -0.25]),
+                    std=jnp.array([0.8, 0.8]),
+                ),
+            ],
+        )
+    else:
+        raise ValueError(f"Unknown case: {which_case}")
     # ================================================================
 
     log(f"=== Case: {case_name} ===")
@@ -555,6 +575,8 @@ def run_training():
     p2_steps_loss: list[int] = []
     p2_gt_losses: list[float] = []
     p2_oracle_gt_losses: list[float] = []
+    p2_frac_v0_steps: list[int] = []
+    p2_frac_v0_values: list[float] = []
     eval_interval_p1 = 200
     eval_interval_p2 = 2500
 
@@ -824,6 +846,9 @@ def run_training():
             )
 
         if step % eval_interval_p2 == 0 or step == n_phase2_steps - 1:
+            frac_null_eval = float(jnp.mean(V_flat == 0.0))
+            p2_frac_v0_steps.append(step)
+            p2_frac_v0_values.append(frac_null_eval)
             gt_loss = float(eval_flow_loss(
                 u_model, U_eval_gt, X_eval_gt, V_eval_gt, eval_key_fixed))
             oracle_gt_loss = float(eval_flow_loss(
@@ -834,10 +859,12 @@ def run_training():
             p2_oracle_gt_losses.append(oracle_gt_loss)
             if not should_log_p2(step):
                 log(f"  iter {step:6d}  gt_U-loss={gt_loss:.6f}"
-                    f"  oracle_gt_U-loss={oracle_gt_loss:.6f}")
+                    f"  oracle_gt_U-loss={oracle_gt_loss:.6f}"
+                    f"  frac(V=0)={frac_null_eval:.3f}")
             else:
                 log(f"  iter {step:6d}  [eval] bootstrap_gt={gt_loss:.6f}"
-                    f"  oracle_gt={oracle_gt_loss:.6f}")
+                    f"  oracle_gt={oracle_gt_loss:.6f}"
+                    f"  frac(V=0)={frac_null_eval:.3f}")
 
     jax.block_until_ready((loss_u, loss_v))
     dt_p2 = time_mod.time() - t_phase2
@@ -1013,39 +1040,28 @@ def run_training():
     plt.close(fig)
     results["true_vs_inferred_U.png"] = buf.getvalue()
 
-    # ---- Plot: Survival function of rho for V=1 marks ----
-    def _survival(arr):
-        s = np.sort(arr)
-        surv = 1.0 - np.arange(1, len(s) + 1) / len(s)
-        return s, surv
-
+    # ---- Plot: P(V=0) estimate over Phase II training ----
     fig, ax = plt.subplots(figsize=(8, 6))
-    if len(rho_ref_active) > 0:
-        x_s, y_s = _survival(rho_ref_active)
-        ax.plot(x_s, y_s, label="true π (V=1)", color="tab:blue", lw=1.5)
-    if len(rho_p1_active) > 0:
-        x_s, y_s = _survival(rho_p1_active)
-        ax.plot(x_s, y_s, label="post-Phase-I (V=1)", color="tab:green",
-                lw=1.5, ls="--")
-    if len(rho_inf_active) > 0:
-        x_s, y_s = _survival(rho_inf_active)
-        ax.plot(x_s, y_s, label="final (post-Phase-II, V=1)",
-                color="tab:orange", lw=1.5)
-    ax.set_yscale("log")
-    ax.set_xlabel("ρ")
-    ax.set_ylabel("P(ρ > t) for V=1 marks")
+    if len(p2_frac_v0_steps) > 0:
+        ax.plot(p2_frac_v0_steps, p2_frac_v0_values,
+                label="Bootstrap P̂(V=0)", color="tab:orange", lw=2)
+    ax.axhline(null_prob_true, color="tab:blue", lw=1.5, ls="--",
+               label=f"True P(V=0) = {null_prob_true}")
+    ax.axhline(null_prob_init, color="gray", lw=1, ls=":",
+               label=f"Initial guess P(V=0) = {null_prob_init}")
+    ax.set_xlabel("Phase II step")
+    ax.set_ylabel("Estimated P(V=0)")
     ax.set_title(
-        f"Empirical survival of ρ for V=1 marks  ({case_name})\n"
-        f"null_prob={null_prob_true}, post-P1 frac(V=0)={frac_p1_str}, "
-        f"final frac(V=0)={frac_str}")
+        f"Marginal P(V=0) estimate during Phase II  ({case_name})\n"
+        f"true={null_prob_true}, init={null_prob_init}")
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(bottom=1e-4, top=1.0)
+    ax.set_ylim(0, 1)
     fig.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
-    results["rho_survival.png"] = buf.getvalue()
+    results["pv0_over_time.png"] = buf.getvalue()
 
     # ---- Plot: Loss curves ----
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
