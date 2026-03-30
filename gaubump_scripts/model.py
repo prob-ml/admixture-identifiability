@@ -1,12 +1,17 @@
 """Generative model for the Gaussian-bump additive process.
 
 Mark space S = R^2, with each mark (rho, logsigma) defining a shape
-    f(x) = rho * exp(-x^2 / (2 * exp(2*logsigma)))
+    f(x) = V * rho * exp(-x^2 / (2 * exp(2*logsigma)))
 on the integer grid {-L, ..., L}.
 
+A binary latent **V** gates each mark: V=0 means the mark is null
+(contributing nothing to X) and V=1 means it is active with amplitude
+rho used directly.  Null marks always have rho=0, logsigma=0 by
+convention.
+
 Given a shape distribution pi, a draw of the observation X in R^{T-2L+1}
-is produced by sampling U_t ~ pi for t in {0,...,T} and summing the
-shifted shapes.
+is produced by sampling (V_t, U_t) ~ pi for t in {0,...,T} and summing
+the shifted shapes gated by V.
 """
 
 from __future__ import annotations
@@ -21,27 +26,30 @@ from typing import NamedTuple
 # Shape evaluation
 # ---------------------------------------------------------------------------
 
-def shape_fn(rho: jnp.ndarray, logsigma: jnp.ndarray, xs: jnp.ndarray) -> jnp.ndarray:
+def shape_fn(V: jnp.ndarray, rho: jnp.ndarray, logsigma: jnp.ndarray,
+             xs: jnp.ndarray) -> jnp.ndarray:
     """Evaluate the Gaussian bump shape at integer positions *xs*.
 
-    f(x) = rho * exp(-x^2 / (2 * exp(2*logsigma)))
+    f(x) = V * rho * exp(-x^2 / (2 * exp(2*logsigma)))
 
     Args:
-        rho:      scalar or array of amplitudes
-        logsigma: scalar or array of log-scale parameters
+        V:        scalar or array, binary gate (0=null, 1=active).
+        rho:      scalar or array of amplitudes.
+        logsigma: scalar or array of log-scale parameters.
         xs:       1-D array of integer positions, e.g. jnp.arange(-L, L+1)
 
     Returns:
         Array of shape (*rho.shape, len(xs)).
     """
+    V = jnp.asarray(V, dtype=jnp.float32)
     rho = jnp.asarray(rho)
     logsigma = jnp.asarray(logsigma)
     xs = jnp.asarray(xs, dtype=jnp.float32)
     # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
     logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # sigma^2
-    # rho[..., None] * exp(...)  broadcasts over xs
-    return rho[..., None] * jnp.exp(-xs**2 / (2.0 * var[..., None]))
+    return (V[..., None] * rho[..., None]
+            * jnp.exp(-xs**2 / (2.0 * var[..., None])))
 
 
 # ---------------------------------------------------------------------------
@@ -58,22 +66,25 @@ class GaussianComponent(NamedTuple):
 class ShapeDistribution(NamedTuple):
     """Mixture distribution on R^2 = (rho, logsigma).
 
-    With probability *null_prob* we emit (0, logsigma) where logsigma is
-    drawn from a standard normal (the value is irrelevant since rho=0).
-    Otherwise we draw from a mixture of axis-aligned Gaussians given by
-    *components*.
+    With probability *null_prob* we emit V=0 with (rho, logsigma) = (0, 0).
+    Otherwise we emit V=1 and draw (rho, logsigma) from a mixture of
+    axis-aligned Gaussians given by *components*.
     """
     null_prob: float
     components: list  # list[GaussianComponent]
 
 
 class EmpiricalDistribution(NamedTuple):
-    """Empirical distribution: sample uniformly (with replacement) from *samples*."""
-    samples: jnp.ndarray  # shape (N, 2)
+    """Empirical distribution: sample uniformly (with replacement).
+
+    *V_samples* is a (N,) binary array and *U_samples* is (N, 2).
+    """
+    V_samples: jnp.ndarray  # shape (N,)
+    U_samples: jnp.ndarray  # shape (N, 2)
 
 
-def sample_pi(key: jax.Array, pi, n: int) -> jnp.ndarray:
-    """Draw *n* i.i.d. marks from a shape distribution.
+def sample_pi(key: jax.Array, pi, n: int):
+    """Draw *n* i.i.d. (V, mark) tuples from a shape distribution.
 
     Args:
         key: PRNG key.
@@ -81,6 +92,7 @@ def sample_pi(key: jax.Array, pi, n: int) -> jnp.ndarray:
         n:   number of samples.
 
     Returns:
+        V:     array of shape (n,), binary gate.
         marks: array of shape (n, 2).
     """
     if isinstance(pi, EmpiricalDistribution):
@@ -88,16 +100,17 @@ def sample_pi(key: jax.Array, pi, n: int) -> jnp.ndarray:
     return _sample_mixture(key, pi, n)
 
 
-def _sample_empirical(key: jax.Array, pi: EmpiricalDistribution, n: int) -> jnp.ndarray:
-    idxs = jax.random.randint(key, shape=(n,), minval=0, maxval=pi.samples.shape[0])
-    return pi.samples[idxs]
+def _sample_empirical(key: jax.Array, pi: EmpiricalDistribution, n: int):
+    idxs = jax.random.randint(key, shape=(n,), minval=0, maxval=pi.V_samples.shape[0])
+    return pi.V_samples[idxs], pi.U_samples[idxs]
 
 
-def _sample_mixture(key: jax.Array, pi: ShapeDistribution, n: int) -> jnp.ndarray:
+def _sample_mixture(key: jax.Array, pi: ShapeDistribution, n: int):
     k_null, k_comp, k_which, k_gauss = jax.random.split(key, 4)
 
-    # Decide which samples are null (rho=0)
+    # V: 1 = active, 0 = null
     is_null = jax.random.bernoulli(k_null, p=pi.null_prob, shape=(n,))
+    V = (1 - is_null).astype(jnp.float32)
 
     # For non-null: pick a component
     n_comp = len(pi.components)
@@ -116,23 +129,23 @@ def _sample_mixture(key: jax.Array, pi: ShapeDistribution, n: int) -> jnp.ndarra
     z = jax.random.normal(k_gauss, shape=(n, 2))
     non_null_samples = chosen_mean + chosen_std * z
 
-    # Null samples: rho=0, logsigma irrelevant (draw from N(0,1))
-    null_logsigma = jax.random.normal(k_null, shape=(n,))
-    null_samples = jnp.stack([jnp.zeros(n), null_logsigma], axis=-1)
+    # Null samples: (0, 0) — V gates these out
+    null_samples = jnp.zeros((n, 2))
 
     # Combine
-    marks = jnp.where(is_null[:, None], null_samples, non_null_samples)
-    return marks
+    marks = jnp.where(V[:, None] > 0.5, non_null_samples, null_samples)
+    return V, marks
 
 
 # ---------------------------------------------------------------------------
 # Observation computation
 # ---------------------------------------------------------------------------
 
-def compute_X(U: jnp.ndarray, L: int) -> jnp.ndarray:
-    """Compute the observation vector X from a latent sequence U.
+def compute_X(V: jnp.ndarray, U: jnp.ndarray, L: int) -> jnp.ndarray:
+    """Compute the observation vector X from a latent sequence (V, U).
 
     Args:
+        V: array of shape (T+1,), binary gate.
         U: array of shape (T+1, 2), marks for t=0,...,T.
         L: support window.
 
@@ -149,17 +162,11 @@ def compute_X(U: jnp.ndarray, L: int) -> jnp.ndarray:
     # Integer grid for the shape support
     xs = jnp.arange(-L, L + 1, dtype=jnp.float32)  # (2L+1,)
 
-    # Vectorised: shapes[tau, dx] = rho_tau * exp(-(dx)^2 / 2*sigma_tau^2)
-    # where dx ranges over -L..L
-    # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
+    # Vectorised: shapes[tau, dx] = V_tau * rho_tau * exp(-(dx)^2 / 2*sigma_tau^2)
     logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # (T+1,)
-    shapes = rho[:, None] * jnp.exp(-xs[None, :] ** 2 / (2.0 * var[:, None]))
+    shapes = V[:, None] * rho[:, None] * jnp.exp(-xs[None, :] ** 2 / (2.0 * var[:, None]))
     # shapes: (T+1, 2L+1)
-
-    # X_t = sum_{tau} shapes[tau, t - tau] for t in {L,...,T-L}.
-    # Observation index i = t - L, so i in {0,...,T-2L}.
-    # For fixed tau, dx in {-L,...,L}: t = tau+dx, i = tau+dx-L.
 
     X = jnp.zeros(n_obs)
     for tau in range(T_plus_1):
@@ -172,13 +179,14 @@ def compute_X(U: jnp.ndarray, L: int) -> jnp.ndarray:
     return X
 
 
-def compute_X_batched(U: jnp.ndarray, L: int) -> jnp.ndarray:
+def compute_X_batched(V: jnp.ndarray, U: jnp.ndarray, L: int) -> jnp.ndarray:
     """Vectorised observation computation for a batch of latent sequences.
 
     Uses explicit matrix construction instead of Python loops so the
     computation can be fully traced by JAX.
 
     Args:
+        V: array of shape (batch, T+1), binary gate.
         U: array of shape (batch, T+1, 2).
         L: support window.
 
@@ -193,17 +201,15 @@ def compute_X_batched(U: jnp.ndarray, L: int) -> jnp.ndarray:
     logsigma = U[:, :, 1]    # (batch, T+1)
 
     xs = jnp.arange(-L, L + 1, dtype=jnp.float32)  # (2L+1,)
-    # Clamp logsigma to prevent exp overflow/underflow (NaN when var→0).
     logsigma = jnp.clip(logsigma, -4.0, 4.0)
     var = jnp.exp(2.0 * logsigma)  # (batch, T+1)
 
-    # shapes: (batch, T+1, 2L+1)
-    shapes = rho[:, :, None] * jnp.exp(
+    # shapes: (batch, T+1, 2L+1) — gated by V
+    shapes = V[:, :, None] * rho[:, :, None] * jnp.exp(
         -xs[None, None, :] ** 2 / (2.0 * var[:, :, None])
     )
 
     # Build a dense mapping matrix M of shape (T+1, 2L+1, n_obs)
-    # M[tau, dx_idx, i] = 1 if tau + (dx_idx - L) - L == i, else 0
     tau_grid = jnp.arange(T_plus_1)[:, None]         # (T+1, 1)
     dx_grid = jnp.arange(2 * L + 1)[None, :]         # (1, 2L+1)
     obs_idx = tau_grid + (dx_grid - L) - L             # (T+1, 2L+1)
@@ -211,8 +217,6 @@ def compute_X_batched(U: jnp.ndarray, L: int) -> jnp.ndarray:
     i_grid = jnp.arange(n_obs)[None, None, :]         # (1, 1, n_obs)
     M = (obs_idx[:, :, None] == i_grid).astype(jnp.float32)  # (T+1, 2L+1, n_obs)
 
-    # shapes: (batch, T+1, 2L+1)
-    # Flatten tau and dx_idx dims for the matmul
     M_flat = M.reshape(T_plus_1 * (2 * L + 1), n_obs)       # (K, n_obs)
     shapes_flat = shapes.reshape(U.shape[0], -1)              # (batch, K)
 
@@ -225,7 +229,7 @@ def compute_X_batched(U: jnp.ndarray, L: int) -> jnp.ndarray:
 # ---------------------------------------------------------------------------
 
 def sample_XU(key: jax.Array, pi, L: int, T: int, n_samples: int):
-    """Draw n_samples independent (X, U) pairs.
+    """Draw n_samples independent (X, V, U) triples.
 
     Args:
         key:       PRNG key.
@@ -236,15 +240,16 @@ def sample_XU(key: jax.Array, pi, L: int, T: int, n_samples: int):
 
     Returns:
         X: array of shape (n_samples, T-2L+1).
+        V: array of shape (n_samples, T+1), binary gate.
         U: array of shape (n_samples, T+1, 2).
     """
-    # Draw all marks in one vectorised call, then reshape
     total_marks = n_samples * (T + 1)
-    marks = sample_pi(key, pi, total_marks)       # (total_marks, 2)
+    V_flat, marks = sample_pi(key, pi, total_marks)
+    V = V_flat.reshape(n_samples, T + 1)
     U = marks.reshape(n_samples, T + 1, 2)
 
-    X = compute_X_batched(U, L)  # (n_samples, T-2L+1)
-    return X, U
+    X = compute_X_batched(V, U, L)
+    return X, V, U
 
 
 # ---------------------------------------------------------------------------
@@ -266,45 +271,56 @@ def stack_mixture_params(pi: ShapeDistribution):
 
 
 @partial(jax.jit, static_argnums=(5, 6, 7))
-def sample_XU_mixture(key, null_prob, weights, means, stds, L, T, n_samples):
-    """JIT-compiled (X, U) sampling from a Gaussian mixture shape distribution.
+def sample_XVU_mixture(key, null_prob, weights, means, stds, L, T, n_samples):
+    """JIT-compiled (X, V, U) sampling from a Gaussian mixture shape distribution.
 
     Use :func:`stack_mixture_params` to pre-compute the array arguments
     from a :class:`ShapeDistribution`.  *L*, *T*, and *n_samples* are
     static (they determine array shapes).
+
+    Returns:
+        X: (n_samples, T-2L+1)
+        V: (n_samples, T+1)  binary
+        U: (n_samples, T+1, 2)
     """
     total = n_samples * (T + 1)
     k_null, k_which, k_gauss = jax.random.split(key, 3)
 
     is_null = jax.random.bernoulli(k_null, p=null_prob, shape=(total,))
+    V = (1 - is_null).astype(jnp.float32)
+
     comp_idx = jax.random.choice(
         k_which, weights.shape[0], shape=(total,), p=weights)
-
     chosen_mean = means[comp_idx]
     chosen_std = stds[comp_idx]
     z = jax.random.normal(k_gauss, shape=(total, 2))
     non_null = chosen_mean + chosen_std * z
 
-    null_ls = jax.random.normal(k_null, shape=(total,))
-    null = jnp.stack([jnp.zeros(total), null_ls], axis=-1)
+    null_marks = jnp.zeros((total, 2))
+    marks = jnp.where(V[:, None] > 0.5, non_null, null_marks)
 
-    marks = jnp.where(is_null[:, None], null, non_null)
+    V = V.reshape(n_samples, T + 1)
     U = marks.reshape(n_samples, T + 1, 2)
-    X = compute_X_batched(U, L)
-    return X, U
+    X = compute_X_batched(V, U, L)
+    return X, V, U
 
 
-@partial(jax.jit, static_argnums=(2, 3, 4))
-def sample_XU_empirical(key, samples, L, T, n_samples):
-    """JIT-compiled (X, U) sampling from an empirical distribution.
+@partial(jax.jit, static_argnums=(3, 4, 5))
+def sample_XVU_empirical(key, V_samples, U_samples, L, T, n_samples):
+    """JIT-compiled (X, V, U) sampling from an empirical distribution.
 
-    *samples* is an array of shape ``(N, 2)`` from which marks are drawn
+    *V_samples* is (N,) binary and *U_samples* is (N, 2).  Marks are drawn
     with replacement.  *L*, *T*, and *n_samples* are static.
+
+    Returns:
+        X: (n_samples, T-2L+1)
+        V: (n_samples, T+1)  binary
+        U: (n_samples, T+1, 2)
     """
     total = n_samples * (T + 1)
     idxs = jax.random.randint(
-        key, shape=(total,), minval=0, maxval=samples.shape[0])
-    marks = samples[idxs]
-    U = marks.reshape(n_samples, T + 1, 2)
-    X = compute_X_batched(U, L)
-    return X, U
+        key, shape=(total,), minval=0, maxval=V_samples.shape[0])
+    V = V_samples[idxs].reshape(n_samples, T + 1)
+    U = U_samples[idxs].reshape(n_samples, T + 1, 2)
+    X = compute_X_batched(V, U, L)
+    return X, V, U
