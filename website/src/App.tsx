@@ -1,10 +1,6 @@
 import { type CSSProperties } from "react";
-
-/* ------------------------------------------------------------------ */
-/*  Paths to result images (served from public/)                       */
-/* ------------------------------------------------------------------ */
-const CASE = "case_v_flow_masked_np95_pihat95";
-const img = (name: string) => `/results/${CASE}/${name}`;
+import { Link } from "react-router-dom";
+import { CASES } from "./cases";
 
 /* ------------------------------------------------------------------ */
 /*  Reusable style helpers                                             */
@@ -46,22 +42,14 @@ const pStyle: CSSProperties = {
   marginBottom: "1rem",
 };
 
-const figStyle: CSSProperties = {
-  margin: "1.5rem 0",
-  textAlign: "center",
-};
-
-const imgStyle: CSSProperties = {
-  maxWidth: "100%",
+const eqBlock: CSSProperties = {
+  background: "var(--code-bg)",
   borderRadius: 6,
-  border: "1px solid var(--border)",
-  boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
-};
-
-const captionStyle: CSSProperties = {
-  fontSize: "0.85rem",
-  color: "var(--muted)",
-  marginTop: "0.5rem",
+  padding: "0.75rem 1rem",
+  fontFamily: "var(--font-mono)",
+  fontSize: "0.9rem",
+  overflowX: "auto",
+  margin: "1rem 0",
 };
 
 const tableWrap: CSSProperties = {
@@ -87,45 +75,8 @@ const tdStyle: CSSProperties = {
   borderBottom: "1px solid var(--border)",
 };
 
-const eqBlock: CSSProperties = {
-  background: "var(--code-bg)",
-  borderRadius: 6,
-  padding: "0.75rem 1rem",
-  fontFamily: "var(--font-mono)",
-  fontSize: "0.9rem",
-  overflowX: "auto",
-  margin: "1rem 0",
-};
-
-const gridTwo: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "1fr 1fr",
-  gap: "1.5rem",
-};
-
 /* ------------------------------------------------------------------ */
-/*  Components                                                         */
-/* ------------------------------------------------------------------ */
-
-function Figure({
-  src,
-  alt,
-  caption,
-}: {
-  src: string;
-  alt: string;
-  caption: string;
-}) {
-  return (
-    <figure style={figStyle}>
-      <img src={src} alt={alt} style={imgStyle} />
-      <figcaption style={captionStyle}>{caption}</figcaption>
-    </figure>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  App                                                                */
+/*  App — main landing page                                            */
 /* ------------------------------------------------------------------ */
 export default function App() {
   return (
@@ -260,154 +211,51 @@ export default function App() {
         </p>
       </section>
 
-      {/* ---- What We Find ---- */}
+      {/* ---- Runs ---- */}
       <section style={section}>
-        <h2 style={h2Style}>What We Find</h2>
+        <h2 style={h2Style}>Experiment Runs</h2>
 
-        <h3 style={h3Style}>
-          Case study: <code>case_v_flow_masked_np95_pihat95</code>
-        </h3>
+        <p style={pStyle}>
+          Each run uses the same ground-truth distribution (P(V=0) = 0.95,
+          two-component Gaussian mixture for U | V=1) but varies the
+          initial guess <strong>π̂</strong> — both P̂(V=0) and the
+          distribution on U.
+        </p>
 
         <div style={tableWrap}>
           <table style={tableStyle}>
             <thead>
               <tr>
-                <th style={thStyle}>Parameter</th>
-                <th style={thStyle}>Value</th>
+                <th style={thStyle}>Run</th>
+                <th style={thStyle}>P̂(V=0)</th>
+                <th style={thStyle}>π̂ U-components</th>
+                <th style={thStyle}>Details</th>
               </tr>
             </thead>
             <tbody>
-              <tr>
-                <td style={tdStyle}>Support window L</td>
-                <td style={tdStyle}>3</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>Visible window T</td>
-                <td style={tdStyle}>20</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>True null probability</td>
-                <td style={tdStyle}>0.95</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>Initial guess null probability</td>
-                <td style={tdStyle}>0.95</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>Phase I steps</td>
-                <td style={tdStyle}>10,000</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>Phase II steps</td>
-                <td style={tdStyle}>150,000</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>Architecture</td>
-                <td style={tdStyle}>V-flow + masked U-flow</td>
-              </tr>
-              <tr>
-                <td style={tdStyle}>Seed</td>
-                <td style={tdStyle}>42</td>
-              </tr>
+              {CASES.map((c) => (
+                <tr key={c.slug}>
+                  <td style={tdStyle}>
+                    <Link to={`/runs/${c.slug}`}>{c.label}</Link>
+                  </td>
+                  <td style={tdStyle}>{c.nullProbInit}</td>
+                  <td style={tdStyle}>
+                    {c.pihatComponents.map((comp, i) => (
+                      <span key={i}>
+                        {i > 0 && " + "}
+                        {comp.weight}× 𝒩(μ=({comp.mean.join(", ")}),
+                        σ=({comp.std.join(", ")}))
+                      </span>
+                    ))}
+                  </td>
+                  <td style={tdStyle}>
+                    <Link to={`/runs/${c.slug}`}>View →</Link>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-
-        <p style={pStyle}>
-          The two-flow architecture with masked dynamics cleanly separates
-          joint null/active gate prediction (V-flow) from mark parameter
-          prediction (masked U-flow), while ensuring the U-flow never sees
-          or produces non-zero values at null positions.
-        </p>
-      </section>
-
-      {/* ---- Training Loss Curves ---- */}
-      <section style={section}>
-        <h2 style={h2Style}>Training Loss Curves</h2>
-
-        <p style={pStyle}>
-          We evaluate the masked U-flow loss on a fixed batch of 512
-          ground-truth <code>(X, V, U)</code> triples throughout training.
-          This "GT eval loss" measures how well the flow network predicts the
-          velocity field for <em>active</em> (V=1) marks — the true test of
-          whether the model is learning the correct posterior.
-        </p>
-
-        <p style={pStyle}>
-          In <strong>Phase I</strong>, we plot the U-flow training loss,
-          GT eval U-flow loss, and V-flow loss. All losses decrease
-          together, confirming that training on the proxy distribution also
-          improves performance on real data.
-        </p>
-
-        <p style={pStyle}>
-          In <strong>Phase II</strong>, we compare two pairs of models evaluated
-          on the same fixed GT data. The <em>bootstrap models</em> (initialised
-          from Phase I) are trained using the bootstrap procedure — they never
-          see ground-truth V or U. The <em>oracle models</em> are initialised
-          from scratch and trained on fresh ground-truth{" "}
-          <code>(X, V, U)</code> triples at each step.
-        </p>
-
-        <p style={pStyle}>
-          The y-axis is clipped so that both curves are visible — using{" "}
-          <code>min(oracle_max, bootstrap_max)</code> as the upper limit to
-          avoid showing the very large early losses from the randomly
-          initialised oracle.
-        </p>
-
-        <Figure
-          src={img("loss_curves.png")}
-          alt="Flow matching loss curves"
-          caption="Loss curves evaluated on 512 fixed ground-truth (X, V, U) triples. Left: Phase I shows U-flow training loss, GT eval loss, and V-flow loss. Right: Phase II compares the bootstrap model (orange) against an oracle model trained from scratch (green dashed)."
-        />
-      </section>
-
-      {/* ---- Diagnostic Plots ---- */}
-      <section style={section}>
-        <h2 style={h2Style}>Diagnostic Plots</h2>
-
-        <h3 style={h3Style}>Observation data</h3>
-        <div style={gridTwo}>
-          <Figure
-            src={img("xdata_true.png")}
-            alt="True X observations"
-            caption="X samples from the true model (π with 95% null marks)"
-          />
-          <Figure
-            src={img("xdata_pihat.png")}
-            alt="Initial guess X observations"
-            caption="X samples from the initial guess π̂"
-          />
-        </div>
-
-        <h3 style={h3Style}>Posterior recovery</h3>
-        <Figure
-          src={img("posterior_vs_truth.png")}
-          alt="Posterior vs truth scatter"
-          caption="Ground-truth π samples vs aggregate posterior (V, U) inferred by the two-flow architecture"
-        />
-
-        <h3 style={h3Style}>ρ marginal distribution</h3>
-        <Figure
-          src={img("rho_marginal.png")}
-          alt="Rho marginal histogram"
-          caption="Marginal histogram of ρ for V=1 (active) marks: true distribution vs flow-inferred posterior"
-        />
-
-        <h3 style={h3Style}>ρ survival function</h3>
-        <Figure
-          src={img("rho_survival.png")}
-          alt="Rho survival function"
-          caption="Survival function P(ρ > t) for V=1 marks: true vs inferred"
-        />
-
-        <h3 style={h3Style}>Latent (V, U) comparison</h3>
-        <Figure
-          src={img("true_vs_inferred_U.png")}
-          alt="True vs inferred (V, U)"
-          caption="True latent (V, U) vs inferred (V, U) for a batch of observations"
-        />
       </section>
 
       {/* ---- Footer ---- */}
