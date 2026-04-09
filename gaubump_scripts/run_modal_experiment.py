@@ -423,7 +423,8 @@ def run_training():
     # Change which_case to select the experiment configuration.
     #   "np95_pihat95"  — initial pihat P(V=0)=0.95, broad single Gaussian
     #   "np95_pihat80"  — initial pihat P(V=0)=0.80, shifted single Gaussian
-    which_case = "np95_pihat80"
+    #   "np80_pihat98"  — true P(V=0)=0.80, initial pihat P(V=0)=0.98
+    which_case = "np80_pihat98"
 
     L = 3
     T = 20
@@ -436,27 +437,23 @@ def run_training():
     hidden_dims = [256, 256, 256]
     seed = 42
 
-    # ---- Ground-truth distribution (shared across cases) ----
-    null_prob_true = 0.95
-    pi_true = ShapeDistribution(
-        null_prob=null_prob_true,
-        components=[
-            GaussianComponent(
-                weight=0.7,
-                mean=jnp.array([1.0, 0.0]),
-                std=jnp.array([0.3, 0.3]),
-            ),
-            GaussianComponent(
-                weight=0.3,
-                mean=jnp.array([2.0, -0.5]),
-                std=jnp.array([0.2, 0.2]),
-            ),
-        ],
-    )
+    # ---- Ground-truth and initial-guess distributions per case ----
+    gt_components = [
+        GaussianComponent(
+            weight=0.7,
+            mean=jnp.array([1.0, 0.0]),
+            std=jnp.array([0.3, 0.3]),
+        ),
+        GaussianComponent(
+            weight=0.3,
+            mean=jnp.array([2.0, -0.5]),
+            std=jnp.array([0.2, 0.2]),
+        ),
+    ]
 
-    # ---- Initial guess (pihat) for Phase I — varies per case ----
     if which_case == "np95_pihat95":
         case_name = "case_v_flow_masked_np95_pihat95"
+        null_prob_true = 0.95
         null_prob_init = 0.95
         pihat = ShapeDistribution(
             null_prob=null_prob_init,
@@ -470,6 +467,7 @@ def run_training():
         )
     elif which_case == "np95_pihat80":
         case_name = "case_v_flow_masked_np95_pihat80"
+        null_prob_true = 0.95
         null_prob_init = 0.80
         pihat = ShapeDistribution(
             null_prob=null_prob_init,
@@ -481,8 +479,27 @@ def run_training():
                 ),
             ],
         )
+    elif which_case == "np80_pihat98":
+        case_name = "case_v_flow_masked_np80_pihat98"
+        null_prob_true = 0.80
+        null_prob_init = 0.98
+        pihat = ShapeDistribution(
+            null_prob=null_prob_init,
+            components=[
+                GaussianComponent(
+                    weight=1.0,
+                    mean=jnp.array([1.0, 0.0]),
+                    std=jnp.array([1.0, 1.0]),
+                ),
+            ],
+        )
     else:
         raise ValueError(f"Unknown case: {which_case}")
+
+    pi_true = ShapeDistribution(
+        null_prob=null_prob_true,
+        components=gt_components,
+    )
     # ================================================================
 
     log(f"=== Case: {case_name} ===")

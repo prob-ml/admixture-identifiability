@@ -64,4 +64,19 @@ export const CASES: CaseStudy[] = [
     phaseIISteps: 150_000,
     seed: 42,
   },
+  {
+    id: "case_v_flow_masked_np80_pihat98",
+    label: "True P(V=0)=0.80, P̂(V=0)=0.98",
+    slug: "np80-pihat98",
+    L: 3,
+    T: 20,
+    nullProbTrue: 0.80,
+    nullProbInit: 0.98,
+    pihatComponents: [
+      { weight: 1.0, mean: [1.0, 0.0], std: [1.0, 1.0] },
+    ],
+    phaseISteps: 10_000,
+    phaseIISteps: 150_000,
+    seed: 42,
+  },
 ];
